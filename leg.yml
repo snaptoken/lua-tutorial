@@ -1,0 +1,10 @@
+---
+:name: lua
+:version: "0.0.0"
+:title: Lua From Scratch
+:rouge_theme: github
+:bold_weight: 500
+:repo_author:
+  :name: snaptoken
+  :email: snaptoken@viewsourcecode.org
+...
