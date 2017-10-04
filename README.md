@@ -48,18 +48,18 @@ Here are the main steps I plan to take in developing this tutorial:
 1. Get familiar with Lua. ([lua.org/docs.html](http://www.lua.org/docs.html) has lots of good stuff, make sure to read the papers!)
 2. Get familiar with the Lua source code.
    ([Mike Pall wrote a nice guide](https://www.reddit.com/r/programming/comments/63hth/ask_reddit_which_oss_codebases_out_there_are_so/c02pxbp/))
-3. Decide on a general order in which to implement everything in Lua.
-4. Split the Lua source code into a series of 20 to 70 "macro-steps", where
+3. Annotate the Lua source code, in great detail.
+4. Decide on a general order in which to implement everything in Lua.
+5. Split the Lua source code into a series of 20 to 70 "macro-steps", where
    each step adds about a chapter's worth of functionality.
-5. Iterate on these macro-steps, adding/removing/reordering them until I find a
+6. Iterate on these macro-steps, adding/removing/reordering them until I find a
    good order for them to go in that will best suit the book.
-6. Turn each macro-step into a chapter by splitting it into micro-steps,
+7. Turn each macro-step into a chapter by splitting it into micro-steps,
    writing 1-3 paragraphs to explain each micro-step, and also explaining any
    higher level concepts (like explaining garbage collection in general and
    then giving an overview of how Lua's GC algorithm works).
 
-I'm well into step 2, and am currently working on both step 2 and step 3 in
-parallel.
+I'm well into step 2, and am starting work on step 3.
 
 ### Possible orders
 
