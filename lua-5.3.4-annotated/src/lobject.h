@@ -19,21 +19,21 @@
 // type tag specifies the object's basic type, a possible variant of the basic
 // type, and whether the object is garbage collected.
 
-/*
-** Extra tags for non-values
-*/
 // "Normal" type tags are defined in lua.h, under the heading "basic types".
 // They live there so that they're available in the Lua API. These extra tags
 // are for internal use and so are private.
-#define LUA_TPROTO	LUA_NUMTAGS		/* function prototypes */
+/*
+** Extra tags for non-values
+*/
 // LUA_NUMTAGS is the number of "basic types", and is defined along with the
 // basic type tags in lua.h. LUA_TPROTO is the type tag for Lua function
 // prototypes, of which there is one for each lexical function block that is
 // parsed. Why are function prototypes represented as tagged values? (Because
 // they are garbage collected?)
-#define LUA_TDEADKEY	(LUA_NUMTAGS+1)		/* removed keys in tables */
+#define LUA_TPROTO	LUA_NUMTAGS		/* function prototypes */
 // This one is used more as a sentinel value, for tables with weak references
 // that get garbage collected. See lgc.c:removeentry().
+#define LUA_TDEADKEY	(LUA_NUMTAGS+1)		/* removed keys in tables */
 
 /*
 ** number of all possible tags (including LUA_TNONE but excluding DEADKEY)
@@ -65,27 +65,27 @@
 */
 
 /* Variant tags for functions */
-#define LUA_TLCL	(LUA_TFUNCTION | (0 << 4))  /* Lua closure */
 // LUA_TLCL stands for LUA Type: Lua CLosure. A closure instantiated from a
 // function prototype, with upvalues. Garbage collected.
-#define LUA_TLCF	(LUA_TFUNCTION | (1 << 4))  /* light C function */
+#define LUA_TLCL	(LUA_TFUNCTION | (0 << 4))  /* Lua closure */
 // LUA_TLCF stands for LUA Type: Light C Function. This is represented simply as
 // a pointer to the C function.
-#define LUA_TCCL	(LUA_TFUNCTION | (2 << 4))  /* C closure */
+#define LUA_TLCF	(LUA_TFUNCTION | (1 << 4))  /* light C function */
 // LUA_TCCL stands for LUA Type: C CLosure. Contains a pointer to a C function,
 // and also an array of upvalues. Garbage collected.
+#define LUA_TCCL	(LUA_TFUNCTION | (2 << 4))  /* C closure */
 
 // It takes a while to get to know the acronyms LCL, LCF, and CCL...
 
 
 /* Variant tags for strings */
-#define LUA_TSHRSTR	(LUA_TSTRING | (0 << 4))  /* short strings */
 // Strings up to a certain length are interned, so that two separately
 // instantiated strings with the same contents will point to the same garbage
 // collected object. What is the max length of a short string?
-#define LUA_TLNGSTR	(LUA_TSTRING | (1 << 4))  /* long strings */
+#define LUA_TSHRSTR	(LUA_TSTRING | (0 << 4))  /* short strings */
 // Long strings aren't interned, and are treated a little differently for
 // performance reasons.
+#define LUA_TLNGSTR	(LUA_TSTRING | (1 << 4))  /* long strings */
 
 
 /* Variant tags for numbers */
@@ -155,12 +155,12 @@ typedef union Value {
   GCObject *gc;    /* collectable objects */
   void *p;         /* light userdata */
   int b;           /* booleans */
-  lua_CFunction f; /* light C functions */
-  lua_Integer i;   /* integer numbers */
-  lua_Number n;    /* float numbers */
   // lua_CFunction, lua_Integer, and lua_Number are defined in lua.h, and can be
   // configured in luaconf.h. For example, lua_Integer might be typedef'd as
   // long int, and lua_Number as double.
+  lua_CFunction f; /* light C functions */
+  lua_Integer i;   /* integer numbers */
+  lua_Number n;    /* float numbers */
 } Value;
 
 
@@ -417,6 +417,8 @@ typedef struct lua_TValue {
 */
 
 
+// The Lua stack is an array of `TValue`s. A StkId is a pointer to a slot within
+// the stack.
 typedef TValue *StkId;  /* index to stack elements */
 
 
@@ -426,11 +428,29 @@ typedef TValue *StkId;  /* index to stack elements */
 ** Header for string value; string bytes follow the end of this structure
 ** (aligned according to 'UTString'; see next).
 */
+// Lua's string type. It is garbage-collectable, so it includes the
+// CommonHeader. This allows a TValue to contain a GCObject pointer to it, and
+// cast the pointer to a TString pointer to access the rest of the struct. What
+// does the T stand for in TString?
 typedef struct TString {
   CommonHeader;
+  // The Lua lexer uses this `extra` field to store an integer code for each of
+  // Lua's reserved words (see `llex.c:luaX_init()`). This field has a separate
+  // use for long strings: it contains 1 if the `hash` field below already
+  // contains a hash of the string, so it doesn't have to recompute the hash
+  // more than once for expensively long strings (see
+  // `lstring.c:luaS_hashlongstr()`). `lu_byte` is defined in `llimits.h`, and
+  // is used to differentiate between numeric bytes and actual characters (which
+  // use `char` or `unsigned char`).
   lu_byte extra;  /* reserved words for short strings; "has hash" for longs */
+  // So short strings can't be longer than 255 characters.
   lu_byte shrlen;  /* length for short strings */
+  // Used for hash tables. See lstring.c:luaS_hash().
   unsigned int hash;
+  // This field is a union containing the string length if it's a long string,
+  // and a linked list if it's a short string. The linked list part of the
+  // global string hash table used for string interning. See
+  // `lstring.c:internshrstr()`.
   union {
     size_t lnglen;  /* length for long strings */
     struct TString *hnext;  /* linked list for hash table */
@@ -441,6 +461,12 @@ typedef struct TString {
 /*
 ** Ensures that address after this type is always fully aligned.
 */
+// Note this is a union. L_Umaxalign is defined in llimits.h. I believe the
+// dummy field causes sizeof(UTString) to be a multiple of 4 or 8 or whatever
+// machine's word size is? To be aligned anyway. Which is used in the getstr()
+// macro just below to decide where the actual string data is stored. So this
+// helps keep string data, which is an array of bytes, aligned on a word
+// boundary.
 typedef union UTString {
   L_Umaxalign dummy;  /* ensures maximum alignment for strings */
   TString tsv;
@@ -451,6 +477,8 @@ typedef union UTString {
 ** Get the actual string (array of bytes) from a 'TString'.
 ** (Access to 'extra' ensures that value is really a 'TString'.)
 */
+// String data is stored starting somewhere after the end of the TString struct
+// in memory.
 #define getstr(ts)  \
   check_exp(sizeof((ts)->extra), cast(char *, (ts)) + sizeof(UTString))
 
@@ -459,6 +487,8 @@ typedef union UTString {
 #define svalue(o)       getstr(tsvalue(o))
 
 /* get string length from 'TString *s' */
+// Remember short strings store their length in a single byte field and long
+// strings store their length in a separate size_t field.
 #define tsslen(s)	((s)->tt == LUA_TSHRSTR ? (s)->shrlen : (s)->u.lnglen)
 
 /* get string length from 'TValue *o' */
@@ -469,11 +499,21 @@ typedef union UTString {
 ** Header for userdata; memory area follows the end of this structure
 ** (aligned according to 'UUdata'; see next).
 */
+// Userdata is a Lua type that stores any kind of custom data (generally a
+// user-defined C struct). It's often used when exposing a C API to Lua. It's
+// similar to a TString in that the data is stored at the end of the Udata
+// struct.
 typedef struct Udata {
   CommonHeader;
+  // I guess a Udata can also store a Lua value? In ttuv_ and user_. I guess
+  // this would be useful for giving a basic Lua value its own metatable?
   lu_byte ttuv_;  /* user value's tag */
+  // The metatable can be used to give the Udata its own "object-oriented" type,
+  // and/or define methods and operators on the value.
   struct Table *metatable;
   size_t len;  /* number of bytes */
+  // The Value part that goes with the ttuv_ type tag above. Any reason why
+  // they're split up like this in the struct?
   union Value user_;  /* user value */
 } Udata;
 
@@ -481,6 +521,7 @@ typedef struct Udata {
 /*
 ** Ensures that address after this type is always fully aligned.
 */
+// Similar to UTString above.
 typedef union UUdata {
   L_Umaxalign dummy;  /* ensures maximum alignment for 'local' udata */
   Udata uv;
@@ -491,15 +532,18 @@ typedef union UUdata {
 **  Get the address of memory block inside 'Udata'.
 ** (Access to 'ttuv_' ensures that value is really a 'Udata'.)
 */
+// Similar to getstr() above.
 #define getudatamem(u)  \
   check_exp(sizeof((u)->ttuv_), (cast(char*, (u)) + sizeof(UUdata)))
 
+// Sets the user_ and ttuv_ fields of a Udata to the given TValue.
 #define setuservalue(L,u,o) \
 	{ const TValue *io=(o); Udata *iu = (u); \
 	  iu->user_ = io->value_; iu->ttuv_ = rttype(io); \
 	  checkliveness(L,io); }
 
 
+// Gets the user_ and ttuv_ fields of a Udata, constructing a TValue from them.
 #define getuservalue(L,u,o) \
 	{ TValue *io=(o); const Udata *iu = (u); \
 	  io->value_ = iu->user_; settt_(io, iu->ttuv_); \
@@ -509,8 +553,14 @@ typedef union UUdata {
 /*
 ** Description of an upvalue for function prototypes
 */
+// The Proto struct below contains an array of these, one for each upvalue.
 typedef struct Upvaldesc {
   TString *name;  /* upvalue name (for debug information) */
+  // If the upvalue is a local variable of the outer function, this contains
+  // true and the following idx field contains the local variable's index in the
+  // stack. Otherwise the upvalue comes from an upvalue of the outer function,
+  // in which case instack is 0 and idx contains the index of the upvalue in the
+  // outer function's Upvaldesc array. I think??
   lu_byte instack;  /* whether it is in stack (register) */
   lu_byte idx;  /* index of upvalue (in stack or in outer function's list) */
 } Upvaldesc;
@@ -520,8 +570,12 @@ typedef struct Upvaldesc {
 ** Description of a local variable for function prototypes
 ** (used for debug information)
 */
+// The Proto struct below contains an array of these, one for each local
+// variable. Mainly for debug info?
 typedef struct LocVar {
   TString *varname;
+  // These are indexes into the Proto struct's `code` field, which contains an
+  // array of VM instructions.
   int startpc;  /* first point where variable is active */
   int endpc;    /* first point where variable is dead */
 } LocVar;
@@ -530,27 +584,53 @@ typedef struct LocVar {
 /*
 ** Function Prototypes
 */
+// This is an internally-used garbage-collected Lua type. Remember LUA_TPROTO is
+// defined as an "extra type for non-values" at the top of this file. A Proto is
+// a function prototype, which contains information about a Lua function. This
+// is where all executable Lua VM instructions are stored. (Like C, everything
+// is a function, Lua's just not as explicit about it.) Note that this is
+// different from a Lua closure, which is an actual first-class Lua value
+// instantiated from a Proto. `Proto`s are created by the parser. There is one
+// for each lexical function expression in a piece of parsed Lua code. `Proto`s
+// contain "upvalue information", whereas Lua closures contain actual upvalues.
 typedef struct Proto {
   CommonHeader;
+  // Number of named parameters.
   lu_byte numparams;  /* number of fixed parameters */
+  // Whether the parameter list ends with "...", meaning any number of arguments
+  // may be passed after the fixed parameters.
   lu_byte is_vararg;
+  // Determined by the code generator, and used to grow the stack before calling
+  // a function of this prototype.
   lu_byte maxstacksize;  /* number of registers needed by this function */
+  // Lengths of array fields that follow.
   int sizeupvalues;  /* size of 'upvalues' */
   int sizek;  /* size of 'k' */
   int sizecode;
   int sizelineinfo;
   int sizep;  /* size of 'p' */
   int sizelocvars;
+  // Line number this function was defined on.
   int linedefined;  /* debug information  */
+  // Line number the function definition ends on.
   int lastlinedefined;  /* debug information  */
+  // Array of constant values. VM instructions in `code` refer to these by
+  // index.
   TValue *k;  /* constants used by the function */
+  // VM instructions to be executed when calling this function.
   Instruction *code;  /* opcodes */
+  // Where is this used?
   struct Proto **p;  /* functions defined inside the function */
   int *lineinfo;  /* map from opcodes to source lines (debug information) */
   LocVar *locvars;  /* information about local variables (debug information) */
   Upvaldesc *upvalues;  /* upvalue information */
+  // In functional code you often have an anonymous function being instantiated
+  // over and over inside a loop. This probably allows such a closure to be
+  // reused somehow for better performance?
   struct LClosure *cache;  /* last-created closure with this prototype */
+  // The source code of the function.
   TString  *source;  /* used for debug information */
+  // Used for garbage collection, but how exactly?
   GCObject *gclist;
 } Proto;
 
@@ -559,6 +639,8 @@ typedef struct Proto {
 /*
 ** Lua Upvalues
 */
+// Forward declaration of an upvalue. Struct is defined in lfunc.h. It's used
+// below.
 typedef struct UpVal UpVal;
 
 
@@ -566,16 +648,26 @@ typedef struct UpVal UpVal;
 ** Closures
 */
 
+// There are C closure and there are Lua closures. The ClosureHeader defines
+// what fields they have in common: number of upvalues, and a gclist.
 #define ClosureHeader \
 	CommonHeader; lu_byte nupvalues; GCObject *gclist
 
+// A C closure is a C function pointer and an array of upvalues which it owns
+// and has private access to.
 typedef struct CClosure {
   ClosureHeader;
+  // A lua_CFunction is a function that takes a lua_State* and returns an int.
   lua_CFunction f;
   TValue upvalue[1];  /* list of upvalues */
 } CClosure;
 
 
+// A Lua closure is more complicated. It points to a Lua function (a Proto) and
+// also contains an array of upvalues, but here the upvalues can either be local
+// variables of an outer function or `TValue`s owned by the closure (in the case
+// that the closure outlives the scope that the outer variables live in). The
+// UpVal struct keeps track of all this.
 typedef struct LClosure {
   ClosureHeader;
   struct Proto *p;
@@ -583,6 +675,9 @@ typedef struct LClosure {
 } LClosure;
 
 
+// A Closure is just a union of CClosure and LClosure. It's useful because those
+// structs have a common ClosureHeader, which can identify what type of closure
+// they are using the type tag in the CommonHeader.
 typedef union Closure {
   CClosure c;
   LClosure l;
