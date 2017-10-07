@@ -30,6 +30,8 @@
 
 
 
+// A global static Lua nil value. Sometimes used in assignment to make a TValue
+// contain nil, sometimes used as a sentinel like NONVALIDVALUE in lapi.c.
 LUAI_DDEF const TValue luaO_nilobject_ = {NILCONSTANT};
 
 
@@ -38,9 +40,13 @@ LUAI_DDEF const TValue luaO_nilobject_ = {NILCONSTANT};
 ** (eeeeexxx), where the real value is (1xxx) * 2^(eeeee - 1) if
 ** eeeee != 0 and (xxx) otherwise.
 */
+// Used in the OP_NEWTABLE instruction, to pack the array and table sizes into
+// single byte arguments.
 int luaO_int2fb (unsigned int x) {
   int e = 0;  /* exponent */
   if (x < 8) return x;
+  // Consume the input number in blocks of 4 bits, for performance. This while
+  // loop could be deleted and the function would still work.
   while (x >= (8 << 4)) {  /* coarse steps */
     x = (x + 0xf) >> 4;  /* x = ceil(x / 16) */
     e += 4;
@@ -54,6 +60,8 @@ int luaO_int2fb (unsigned int x) {
 
 
 /* converts back */
+// Obviously used to run the OP_NEWTABLE instruction. See vmcase(OP_NEWTABLE) in
+// lvm.c:luaV_execute().
 int luaO_fb2int (int x) {
   return (x < 8) ? x : ((x & 7) + 8) << ((x >> 3) - 1);
 }
@@ -62,6 +70,11 @@ int luaO_fb2int (int x) {
 /*
 ** Computes ceil(log2(x))
 */
+// Used to set the `lsizenode` field of a Table to the proper power of two for a
+// given requested hash table size, in ltable.c:setnodevector(). Also used in
+// ltable.c:countint() to count array-indexish keys of various magnitudes in a
+// hash table in order to figure out an optimal cutoff for the array part and
+// node part of the table.
 int luaO_ceillog2 (unsigned int x) {
   static const lu_byte log_2[256] = {  /* log_2[i] = ceil(log2(i - 1)) */
     0,1,2,2,3,3,3,3,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
@@ -75,41 +88,65 @@ int luaO_ceillog2 (unsigned int x) {
   };
   int l = 0;
   x--;
+  // Consume a byte at a time. When there's one byte left, use the lookup table.
   while (x >= 256) { l += 8; x >>= 8; }
   return l + log_2[x];
 }
 
 
+// Helper for luaO_arith() below. Performs integer arithmetic on two Lua integer
+// operands.
 static lua_Integer intarith (lua_State *L, int op, lua_Integer v1,
                                                    lua_Integer v2) {
   switch (op) {
+    // intop() is a macro defined in lvm.h which simply does the given C
+    // arithmetic operation, but casts the operands to unsigned types first, and
+    // casts the result back to the signed type.
     case LUA_OPADD: return intop(+, v1, v2);
     case LUA_OPSUB:return intop(-, v1, v2);
     case LUA_OPMUL:return intop(*, v1, v2);
+    // Integer modulo and division are handled specially by luaV_mod() and
+    // luaV_div() which handle some special cases (like throwing an error when
+    // dividing by 0). L (the lua_State) is required for throwing the error.
     case LUA_OPMOD: return luaV_mod(L, v1, v2);
     case LUA_OPIDIV: return luaV_div(L, v1, v2);
     case LUA_OPBAND: return intop(&, v1, v2);
     case LUA_OPBOR: return intop(|, v1, v2);
     case LUA_OPBXOR: return intop(^, v1, v2);
+    // luaV_shiftl() just does a `<<` or `>>` operation (depending whether the
+    // second operand is positive or negative), but also checks for the case
+    // where you're trying to shift by more bits than there are in the integer,
+    // in which case it returns 0 without doing a shift.
     case LUA_OPSHL: return luaV_shiftl(v1, v2);
     case LUA_OPSHR: return luaV_shiftl(v1, -v2);
+    // Unary minus operator.
     case LUA_OPUNM: return intop(-, 0, v1);
+    // Unary bitwise not operator. Is ~0 not a string of all 1's in some
+    // architectures?
     case LUA_OPBNOT: return intop(^, ~l_castS2U(0), v1);
     default: lua_assert(0); return 0;
   }
 }
 
 
+// Helper for luaO_arith() below. Performs arithmetic on two Lua float operands.
 static lua_Number numarith (lua_State *L, int op, lua_Number v1,
                                                   lua_Number v2) {
   switch (op) {
+    // These are macros defined in llimits.h. Most simply just use C's operator
+    // for that operation, e.g. (v1)+(v2) for luai_numadd(L, v1, v2).
     case LUA_OPADD: return luai_numadd(L, v1, v2);
     case LUA_OPSUB: return luai_numsub(L, v1, v2);
     case LUA_OPMUL: return luai_nummul(L, v1, v2);
     case LUA_OPDIV: return luai_numdiv(L, v1, v2);
+    // Uses C's pow() function from <math.h>.
     case LUA_OPPOW: return luai_numpow(L, v1, v2);
+    // Floor division, calculates floor(v1/v2).
     case LUA_OPIDIV: return luai_numidiv(L, v1, v2);
+    // Unary minus operator.
     case LUA_OPUNM: return luai_numunm(L, v1);
+    // Modulo operator. Uses fmod() from <math.h>, and makes a correction for
+    // the case where one of the operands is negative.
     case LUA_OPMOD: {
       lua_Number m;
       luai_nummod(L, v1, v2, m);
@@ -120,9 +157,11 @@ static lua_Number numarith (lua_State *L, int op, lua_Number v1,
 }
 
 
+// Handles all evaluation of Lua operators for any type of Lua value(s).
 void luaO_arith (lua_State *L, int op, const TValue *p1, const TValue *p2,
                  TValue *res) {
   switch (op) {
+    // Bitwise operators.
     case LUA_OPBAND: case LUA_OPBOR: case LUA_OPBXOR:
     case LUA_OPSHL: case LUA_OPSHR:
     case LUA_OPBNOT: {  /* operate only on integers */
