@@ -157,7 +157,9 @@ static lua_Number numarith (lua_State *L, int op, lua_Number v1,
 }
 
 
-// Handles all evaluation of Lua operators for any type of Lua value(s).
+// Handles all evaluation of Lua operators for any type of Lua value(s). Does
+// type coercion for numeric operators, and falls back on tag methods for
+// operating on non-numeric types.
 void luaO_arith (lua_State *L, int op, const TValue *p1, const TValue *p2,
                  TValue *res) {
   switch (op) {
@@ -166,26 +168,35 @@ void luaO_arith (lua_State *L, int op, const TValue *p1, const TValue *p2,
     case LUA_OPSHL: case LUA_OPSHR:
     case LUA_OPBNOT: {  /* operate only on integers */
       lua_Integer i1; lua_Integer i2;
+      // Try to convert both operands to integers (strings and floats can be
+      // converted).
       if (tointeger(p1, &i1) && tointeger(p2, &i2)) {
         setivalue(res, intarith(L, op, i1, i2));
         return;
       }
       else break;  /* go to the end */
     }
+    // Non-integer division and the power operator only operate on floats.
     case LUA_OPDIV: case LUA_OPPOW: {  /* operate only on floats */
       lua_Number n1; lua_Number n2;
+      // Try to convert both operands to floats.
       if (tonumber(p1, &n1) && tonumber(p2, &n2)) {
         setfltvalue(res, numarith(L, op, n1, n2));
         return;
       }
       else break;  /* go to the end */
     }
+    // All other operators can operator on integers or floats, or a mixture of
+    // the two.
     default: {  /* other operations */
       lua_Number n1; lua_Number n2;
+      // If they're both integers, do integer arithmetic, nice and fast.
       if (ttisinteger(p1) && ttisinteger(p2)) {
         setivalue(res, intarith(L, op, ivalue(p1), ivalue(p2)));
         return;
       }
+      // Otherwise convert them both to floats (whether they're strings or ints
+      // or one of them's already a float) and return a float.
       else if (tonumber(p1, &n1) && tonumber(p2, &n2)) {
         setfltvalue(res, numarith(L, op, n1, n2));
         return;
@@ -194,17 +205,30 @@ void luaO_arith (lua_State *L, int op, const TValue *p1, const TValue *p2,
     }
   }
   /* could not perform raw operation; try metamethod */
+  // So NULL is passed for L when doing constant folding?
   lua_assert(L != NULL);  /* should not fail when folding (compile time) */
+  // `op` is converted to a `TMS` (tag method index, see ltm.h) by arithmetic,
+  // so operators and their corresponding tag methods have to be defined in the
+  // same order in those enums. Anyways, this tries to call the tag method on
+  // the first or second operand that is associated with this operator. If there
+  // is no such tag method on either operand's metatable, an error is thrown.
   luaT_trybinTM(L, p1, p2, res, cast(TMS, (op - LUA_OPADD) + TM_ADD));
 }
 
 
+// Converts a hex digit (0-9 or a-f or A-F) to an int. Used below to convert a
+// string to a number, and used a couple other places in Lua as well.
 int luaO_hexavalue (int c) {
+  // lisdigit() and ltolower() are defined in lctype.h. Lua can be configured to
+  // use its own implementation of these, or to use the ones provided by the
+  // standard library's <ctype.h>.
   if (lisdigit(c)) return c - '0';
   else return (ltolower(c) - 'a') + 10;
 }
 
 
+// Skips a positive or negative sign preceding a number, returning true if there
+// was a negative sign. Used below in lua_strx2number() and l_str2int().
 static int isneg (const char **s) {
   if (**s == '-') { (*s)++; return 1; }
   else if (**s == '+') (*s)++;
@@ -213,12 +237,18 @@ static int isneg (const char **s) {
 
 
 
+// lua_strx2number() specifically converts hexadecimal strings (which must begin
+// with "0x" or "0X") to a float.
 /*
 ** {==================================================================
 ** Lua's implementation for 'lua_strx2number'
 ** ===================================================================
 */
 
+// In luaconf.h, lua_strx2number() is defined as an alias of the standard
+// library's strtod() function. Only if we're compiling for C89 do we provide
+// our own implementation, which follows the strtod() specification. I guess
+// strtod() only gained hexadecimal support as of C99?
 #if !defined(lua_strx2number)
 
 /* maximum number of significant digits to read (to avoid overflows
@@ -230,51 +260,82 @@ static int isneg (const char **s) {
 ** C99 specification for 'strtod'
 */
 static lua_Number lua_strx2number (const char *s, char **endptr) {
+  // Decimal point could be a dot or a comma depending on locale, for example.
   int dot = lua_getlocaledecpoint();
   lua_Number r = 0.0;  /* result (accumulator) */
+  // Number of digits after any leading zeroes.
   int sigdig = 0;  /* number of significant digits */
+  // Number of leading zeroes.
   int nosigdig = 0;  /* number of non-significant digits */
+  // We're going to parse the number as if it doesn't have a decimal point, but
+  // keep track of where we saw the decimal point, so at the end we can multiply
+  // the number by a power of 16 to move the decimal point to the right place.
   int e = 0;  /* exponent correction */
   int neg;  /* 1 if number is negative */
   int hasdot = 0;  /* true after seen a dot */
+  // We'll update this to point to the first character in the input string that
+  // we haven't consumed while parsing the number. We'll set it whenever we're
+  // done parsing a valid part of the number, i.e. the numeral part and then the
+  // optional exponent part. This is entirely for the function caller to make
+  // use of.
   *endptr = cast(char *, s);  /* nothing is valid yet */
   while (lisspace(cast_uchar(*s))) s++;  /* skip initial spaces */
+  // Increments s if it points to a positive or negative sign.
   neg = isneg(&s);  /* check signal */
+  // Now there should be a "0x" or "0X".
   if (!(*s == '0' && (*(s + 1) == 'x' || *(s + 1) == 'X')))  /* check '0x' */
     return 0.0;  /* invalid format (no '0x') */
   for (s += 2; ; s++) {  /* skip '0x' and read numeral */
+    // See if current char is a decimal point.
     if (*s == dot) {
       if (hasdot) break;  /* second dot? stop loop */
       else hasdot = 1;
     }
+    // Otherwise we expect a digit.
     else if (lisxdigit(cast_uchar(*s))) {
+      // Ignore leading zeroes, but keep a count of them.
       if (sigdig == 0 && *s == '0')  /* non-significant digit (zero)? */
         nosigdig++;
+      // Otherwise it's a significant digit.
       else if (++sigdig <= MAXSIGDIG)  /* can read it without overflow? */
           r = (r * cast_num(16.0)) + luaO_hexavalue(*s);
       else e++; /* too many digits; ignore, but still count for exponent */
+      // Stop counting decimal places if we're to the right of the decimal
+      // point.
       if (hasdot) e--;  /* decimal digit? correct exponent */
     }
     else break;  /* neither a dot nor a digit */
   }
+  // If there weren't any digits, that's an error.
   if (nosigdig + sigdig == 0)  /* no digits? */
     return 0.0;  /* invalid format */
   *endptr = cast(char *, s);  /* valid up to here */
+  // We're going to be using ldexp() to multiple r by a power of two at the end.
+  // e currently contains the power of 16 exponent that we want to multiply by.
+  // So multiply that by 4 to convert e to a power of 2 exponent.
   e *= 4;  /* each digit multiplies/divides value by 2^4 */
+  // The optional exponent part starts with a "p" for hexadecimal numbers, the
+  // way a decimal number exponent starts with "e".
   if (*s == 'p' || *s == 'P') {  /* exponent part? */
     int exp1 = 0;  /* exponent value */
+    // Not sure if signal is the right word, I think they mean sign.
     int neg1;  /* exponent signal */
     s++;  /* skip 'p' */
     neg1 = isneg(&s);  /* signal */
     if (!lisdigit(cast_uchar(*s)))
       return 0.0;  /* invalid; must have at least one digit */
+    // Oh, the exponent part is in decimal.
     while (lisdigit(cast_uchar(*s)))  /* read exponent */
       exp1 = exp1 * 10 + *(s++) - '0';
     if (neg1) exp1 = -exp1;
+    // Simply add exponent part to e. Both contain power of 2 exponents.
     e += exp1;
+    // Tell the caller we consumed a valid number up to this point in the
+    // string.
     *endptr = cast(char *, s);  /* valid up to here */
   }
   if (neg) r = -r;
+  // Finally, multiply r (the result) by 2 to the power of e (the exponent).
   return l_mathop(ldexp)(r, e);
 }
 
@@ -283,10 +344,14 @@ static lua_Number lua_strx2number (const char *s, char **endptr) {
 
 
 /* maximum length of a numeral */
+// Size of buffer used by l_str2d() to retry a string-to-float conversion with
+// the decimal point replaced by a locale-specific decimal point (say a comma
+// instead of a dot).
 #if !defined (L_MAXLENNUM)
 #define L_MAXLENNUM	200
 #endif
 
+// Helper for l_str2d() below.
 static const char *l_str2dloc (const char *s, lua_Number *result, int mode) {
   char *endptr;
   *result = (mode == 'x') ? lua_strx2number(s, &endptr)  /* try to convert */
@@ -297,6 +362,7 @@ static const char *l_str2dloc (const char *s, lua_Number *result, int mode) {
 }
 
 
+// Helper for luaO_str2num() below. Converts a string to a float.
 /*
 ** Convert string 's' to a Lua number (put in 'result'). Return NULL
 ** on fail or the address of the ending '\0' on success.
