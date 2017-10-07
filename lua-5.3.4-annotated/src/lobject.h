@@ -693,37 +693,64 @@ typedef union Closure {
 ** Tables
 */
 
+// A key in a Lua table is any Lua value (except nil).
 typedef union TKey {
   struct {
+    // The Value and type tag fields of the TValue part.
     TValuefields;
+    // Key-value pairs are stored in an array inside a Lua table. The `next`
+    // field contains the index, relative to the current key's position, of the
+    // next key in the chain.
     int next;  /* for chaining (offset for next node) */
   } nk;
+  // An alternate way to access the Value and type tag of the key as a TValue.
+  // This is solely used to define the gkey() macro in ltable.h. Why are there
+  // two ways to access the TValue in a TKey?
   TValue tvk;
 } TKey;
 
 
 /* copy a value into a key without messing up field 'next' */
+// Similar to setfltvalue(), etc. earlier in this file.
 #define setnodekey(L,key,obj) \
 	{ TKey *k_=(key); const TValue *io_=(obj); \
 	  k_->nk.value_ = io_->value_; k_->nk.tt_ = io_->tt_; \
 	  (void)L; checkliveness(L,io_); }
 
 
+// A key-value pair in a Lua table. The table contains an array of these. Keys
+// and values are pretty much just `TValue`s, except the `TKey`s contain the
+// `next` field for chaining.
 typedef struct Node {
   TValue i_val;
   TKey i_key;
 } Node;
 
 
+// A Lua table object.
 typedef struct Table {
   CommonHeader;
+  // This is used to very quickly check a metatable for operator overrides when
+  // evaluating operators and such. See ltm.h:gfasttm().
   lu_byte flags;  /* 1<<p means tagmethod(p) is not present */
+  // The node array's length is always a power of 2, so this stores the length
+  // as an exponent.
   lu_byte lsizenode;  /* log2 of size of 'node' array */
+  // Lua doesn't have arrays, it uses tables for everything. So tables also
+  // include an array part for performance. This is the length of the array
+  // part.
   unsigned int sizearray;  /* size of 'array' array */
   TValue *array;  /* array part */
+  // Hash table part.
   Node *node;
+  // Tables are searched for free positions from the end, so remember where the
+  // search ended last time and start searching from there next time. Right?
+  // (See `ltable.c:getfreepos()`.)
   Node *lastfree;  /* any free position is before this position */
+  // Like Udata, Tables can have their own metatable. (Other types just have one
+  // global metatable shared by all objects of that type.)
   struct Table *metatable;
+  // Used for garbage collection, but how exactly?
   GCObject *gclist;
 } Table;
 
@@ -732,25 +759,31 @@ typedef struct Table {
 /*
 ** 'module' operation for hashing (size is always a power of 2)
 */
+// Used by hash functions in ltable.c as well as the string table in lstring.c.
 #define lmod(s,size) \
 	(check_exp((size&(size-1))==0, (cast(int, (s) & ((size)-1)))))
 
 
 #define twoto(x)	(1<<(x))
+// Get the actual number of elements in a hash table by calculating the power of
+// two that is stored in `lsizenode`.
 #define sizenode(t)	(twoto((t)->lsizenode))
 
 
 /*
 ** (address of) a fixed nil value
 */
+// luaO_nilobject_ is a static TValue containing nil, defined in lobject.c.
 #define luaO_nilobject		(&luaO_nilobject_)
 
 
+// LUAI_DDEC is usually defined as `extern`, in luaconf.h.
 LUAI_DDEC const TValue luaO_nilobject_;
 
 /* size of buffer for 'luaO_utf8esc' function */
 #define UTF8BUFFSZ	8
 
+// LUAI_FUNC is usually defined as `extern`, in luaconf.h.
 LUAI_FUNC int luaO_int2fb (unsigned int x);
 LUAI_FUNC int luaO_fb2int (int x);
 LUAI_FUNC int luaO_utf8esc (char *buff, unsigned long x);
