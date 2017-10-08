@@ -277,7 +277,8 @@ static lua_Number lua_strx2number (const char *s, char **endptr) {
   // we haven't consumed while parsing the number. We'll set it whenever we're
   // done parsing a valid part of the number, i.e. the numeral part and then the
   // optional exponent part. This is entirely for the function caller to make
-  // use of.
+  // use of. If, when this function returns, s == *endptr, the caller knows that
+  // the string couldn't be converted to a float.
   *endptr = cast(char *, s);  /* nothing is valid yet */
   while (lisspace(cast_uchar(*s))) s++;  /* skip initial spaces */
   // Increments s if it points to a positive or negative sign.
@@ -351,13 +352,26 @@ static lua_Number lua_strx2number (const char *s, char **endptr) {
 #define L_MAXLENNUM	200
 #endif
 
-// Helper for l_str2d() below.
+// Helper for l_str2d() below. Tries to convert the string s to a float, making
+// sure there is nothing but whitespace remaining in the string after the parsed
+// number. l_str2d() might call this twice, once with the original string, and
+// then if that fails, once with the decimal point in the original string
+// replaced by a possibly different decimal point character (like a comma),
+// depending on the locale. That is why 'loc' is part of the function's name. If
+// `mode` is 'x', that is a hint that the number to be parsed is a hexadecimal
+// number.
 static const char *l_str2dloc (const char *s, lua_Number *result, int mode) {
   char *endptr;
+  // Remember, in C99 both lua_strx2number() and lua_str2number() are just
+  // aliases for the standard library's strtod().
   *result = (mode == 'x') ? lua_strx2number(s, &endptr)  /* try to convert */
                           : lua_str2number(s, &endptr);
+  // If endptr wasn't incremented at all, then nothing was parsed and the string
+  // must not contain a valid number.
   if (endptr == s) return NULL;  /* nothing recognized? */
   while (lisspace(cast_uchar(*endptr))) endptr++;  /* skip trailing spaces */
+  // Fail if there are any non-whitespace characters after the end of the
+  // number.
   return (*endptr == '\0') ? endptr : NULL;  /* OK if no trailing characters */
 }
 
@@ -378,35 +392,66 @@ static const char *l_str2dloc (const char *s, lua_Number *result, int mode) {
 */
 static const char *l_str2d (const char *s, lua_Number *result) {
   const char *endptr;
+  // strpbrk() is from the standard library, and returns a pointer to the first
+  // character in s that is in the given set of characters. If the number is
+  // hexadecimal, then it starts with "0x" or "0X" so we search for an 'x' or
+  // 'X' to see if the number is hexadecimal. If the number is "NaN" or "Inf" it
+  // contains an 'n' or 'N'. Most of the time, the number won't be hexadecimal
+  // or "NaN" or "Inf", it'll just be a decimal number. In those common cases,
+  // it would be nice to not have to search through the whole string for x's and
+  // n's, so we include the '.' in the search so that the search is cut short as
+  // soon as it hits a decimal point. That works because the x's and n's we are
+  // looking for should come before any decimal point.
   const char *pmode = strpbrk(s, ".xXnN");
+  // If none of those characters were found, strpbrk() returns NULL and so
+  // `mode` will be set to 0.
   int mode = pmode ? ltolower(cast_uchar(*pmode)) : 0;
   if (mode == 'n')  /* reject 'inf' and 'nan' */
     return NULL;
   endptr = l_str2dloc(s, result, mode);  /* try to convert */
   if (endptr == NULL) {  /* failed? may be a different locale */
+    // Copy the string into a buffer we can modify, and change the decimal
+    // point to locale-specific one.
     char buff[L_MAXLENNUM + 1];
     const char *pdot = strchr(s, '.');
     if (strlen(s) > L_MAXLENNUM || pdot == NULL)
       return NULL;  /* string too long or no dot; fail */
     strcpy(buff, s);  /* copy string to buffer */
+    // lua_getlocaledecpoint() is defined in luaconf.h, and uses the standard
+    // library's localeconv() to get the locale's decimal point character.
     buff[pdot - s] = lua_getlocaledecpoint();  /* correct decimal point */
     endptr = l_str2dloc(buff, result, mode);  /* try again */
     if (endptr != NULL)
+      // Success! endptr now points into our temporary buffer, so we need to
+      // correct it to point into the original string s.
       endptr = s + (endptr - buff);  /* make relative to 's' */
   }
   return endptr;
 }
 
 
+// The maximum integer that can be safely multiplied by 10. Used below for
+// detecting overflow when converting a string to an int.
 #define MAXBY10		cast(lua_Unsigned, LUA_MAXINTEGER / 10)
+// The least significant digit in the maximum integer. Used below for detecting
+// *exactly* when overflow will occur.
 #define MAXLASTD	cast_int(LUA_MAXINTEGER % 10)
 
+// Helper for luaO_str2num() below. Converts a string to an integer.
 static const char *l_str2int (const char *s, lua_Integer *result) {
+  // 'a' for accumulator? The absolute value of the result will be accumulated
+  // in this unsigned variable.
   lua_Unsigned a = 0;
+  // This is set to 0 as soon as we parse a single digit. So if it's still 1 at
+  // the end of parsing, that means there were no digits and the string is
+  // invalid.
   int empty = 1;
   int neg;
   while (lisspace(cast_uchar(*s))) s++;  /* skip initial spaces */
+  // Skip the positive or negative sign if it exists, and remember whether there
+  // was a negative sign.
   neg = isneg(&s);
+  // If it starts with "0x" or "0X", parse it as a hexadecimal number.
   if (s[0] == '0' &&
       (s[1] == 'x' || s[1] == 'X')) {  /* hex? */
     s += 2;  /* skip '0x' */
@@ -415,9 +460,14 @@ static const char *l_str2int (const char *s, lua_Integer *result) {
       empty = 0;
     }
   }
+  // If it's not hexadecimal, it has to be decimal.
   else {  /* decimal */
     for (; lisdigit(cast_uchar(*s)); s++) {
       int d = *s - '0';
+      // Integer overflow detection. Checks if multiplying `a` by 10 and adding
+      // `d` would result in an integer larger than LUA_MAXINTEGER (which would
+      // really result in overflow). Why does the hexadecimal parsing code above
+      // not do any overflow checking?
       if (a >= MAXBY10 && (a > MAXBY10 || d > MAXLASTD + neg))  /* overflow? */
         return NULL;  /* do not accept it (as integer) */
       a = a * 10 + d;
@@ -425,14 +475,23 @@ static const char *l_str2int (const char *s, lua_Integer *result) {
     }
   }
   while (lisspace(cast_uchar(*s))) s++;  /* skip trailing spaces */
+  // There should've been at least one digit, and there shouldn't be any
+  // characters after the end of the number except the whitespace we just
+  // skipped.
   if (empty || *s != '\0') return NULL;  /* something wrong in the numeral */
   else {
+    // Success. Write the integer to `result`, making it negative if the number
+    // had a negative sign.
     *result = l_castU2S((neg) ? 0u - a : a);
     return s;
   }
 }
 
 
+// Converts a string to a numeric TValue, representing it as an int if possible,
+// otherwise a float. Returns size of string on success, 0 on failure. Used by
+// the lexer (see `llex.c:read_numeral()`) and the VM for type coercion. Also
+// exposed as part of the Lua API in lapi.c:lua_stringtonumber().
 size_t luaO_str2num (const char *s, TValue *o) {
   lua_Integer i; lua_Number n;
   const char *e;
@@ -448,20 +507,37 @@ size_t luaO_str2num (const char *s, TValue *o) {
 }
 
 
+// Encodes a Unicode codepoint `x` as a utf-8 sequence of bytes, writing the
+// bytes into `buff` and returning the number of bytes in the sequence. The
+// buffer is filled from the end, so the resulting byte sequence is
+// "right-aligned" in `buff`.
 int luaO_utf8esc (char *buff, unsigned long x) {
   int n = 1;  /* number of bytes put in buffer (backwards) */
   lua_assert(x <= 0x10FFFF);
   if (x < 0x80)  /* ascii? */
+    // ASCII characters remain unchanged in utf-8. Just store the ASCII byte at
+    // the end of the `buff` and return 1.
     buff[UTF8BUFFSZ - 1] = cast(char, x);
   else {  /* need continuation bytes */
+    // Otherwise we need to use utf-8's rules for encoding a codepoint in a
+    // variable number of bytes. `mfb` stands for "Maximum that Fits in First
+    // Byte", I guess.
     unsigned int mfb = 0x3f;  /* maximum that fits in first byte */
     do {  /* add continuation bytes */
+      // Write the lowermost 6 bits of x into the lowermost 6 bits of the
+      // current byte in the sequence, and make the upper two bits '10' to mark
+      // this as a continuation byte.
       buff[UTF8BUFFSZ - (n++)] = cast(char, 0x80 | (x & 0x3f));
       x >>= 6;  /* remove added bits */
       mfb >>= 1;  /* now there is one less bit available in first byte */
     } while (x > mfb);  /* still needs continuation byte? */
+    // Finally, we write the first byte. The first byte has the same number of
+    // uppermost 1-bits as there are continuation bytes in the sequence. This
+    // sequence of 1-bits is followed by a 0-bit, and then the final bits from
+    // `x` that need to be written.
     buff[UTF8BUFFSZ - n] = cast(char, (~mfb << 1) | x);  /* add first byte */
   }
+  // Return number of bytes in the sequence.
   return n;
 }
 
@@ -473,25 +549,47 @@ int luaO_utf8esc (char *buff, unsigned long x) {
 /*
 ** Convert a number object to a string
 */
+// Used by luaO_pushvfstring() below. Also by the Lua API function
+// lua_tolstring(). Note that StkId is just a TValue*, but it's understood that
+// it's a pointer into a Lua stack (array of `TValue`s). This function replaces
+// The numeric TValue at the given stack slot with a string TValue.
 void luaO_tostring (lua_State *L, StkId obj) {
   char buff[MAXNUMBER2STR];
   size_t len;
   lua_assert(ttisnumber(obj));
+  // lua_integer2str() and lua_number2str() are defined in luaconf.h to use the
+  // standard library's snprintf(), when compiling for C99. In C89, snprintf()
+  // doesn't support formatting numbers as hexadecimal, so lua provides its own
+  // implementation in lstrlib.c:lua_number2strx().
   if (ttisinteger(obj))
     len = lua_integer2str(buff, sizeof(buff), ivalue(obj));
   else {
     len = lua_number2str(buff, sizeof(buff), fltvalue(obj));
+    // Show floats that contain integer values as '123.0' instead of '123',
+    // unless LUA_COMPAT_FLOATSTRING is defined. Lua used to use floats to
+    // represent all numbers, and so omitting the '.0' for integers was
+    // desirable.
 #if !defined(LUA_COMPAT_FLOATSTRING)
+    // strspn() from <string.h> returns the index of the first character in buff
+    // that isn't in the given charset. If that character is the nul character,
+    // that means that every character is a digit or minus sign, which means it
+    // looks like an int. In that case, add '.0' to show that it's really a
+    // float.
     if (buff[strspn(buff, "-0123456789")] == '\0') {  /* looks like an int? */
       buff[len++] = lua_getlocaledecpoint();
       buff[len++] = '0';  /* adds '.0' to result */
     }
 #endif
   }
+  // luaS_newlstr() creates a Lua string out of a given C string and length.
+  // setsvalue2s() is just setsvalue(), but self-documents that it's setting a
+  // value on the stack ('2s' stands for 'to stack').
   setsvalue2s(L, obj, luaS_newlstr(L, buff, len));
 }
 
 
+// Helper for luaO_pushvfstring() below. Converts the given C string to a Lua
+// TValue string and pushes it onto the Lua stack.
 static void pushstr (lua_State *L, const char *str, size_t l) {
   setsvalue2s(L, L->top, luaS_newlstr(L, str, l));
   luaD_inctop(L);
