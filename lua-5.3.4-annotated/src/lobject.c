@@ -591,6 +591,9 @@ void luaO_tostring (lua_State *L, StkId obj) {
 // Helper for luaO_pushvfstring() below. Converts the given C string to a Lua
 // TValue string and pushes it onto the Lua stack.
 static void pushstr (lua_State *L, const char *str, size_t l) {
+  // So, this is how you push to the Lua stack: set the TValue that L->top
+  // points to, and then increment L->top. (luaD_inctop() also takes care of
+  // growing the stack if need be.)
   setsvalue2s(L, L->top, luaS_newlstr(L, str, l));
   luaD_inctop(L);
 }
@@ -600,15 +603,29 @@ static void pushstr (lua_State *L, const char *str, size_t l) {
 ** this function handles only '%d', '%c', '%f', '%p', and '%s'
    conventional formats, plus Lua-specific '%I' and '%U'
 */
+// printf()-style function for pushing a formatted string to the Lua stack. The
+// variadic version of this function is just below, luaO_pushfstring().
 const char *luaO_pushvfstring (lua_State *L, const char *fmt, va_list argp) {
+  // We'll push each part of the format string to the stack, then concatenate
+  // all the parts into one string at the end. `n` will keep track of how many
+  // parts we've pushed to the stack.
   int n = 0;
   for (;;) {
+    // Find the next format specifier (like %d, %c, %%, etc.) by searching for a
+    // percent sign..
     const char *e = strchr(fmt, '%');
+    // If there are no more format specifiers, break out of the loop. (This is
+    // the only place the infinite loop is broken out of.)
     if (e == NULL) break;
+    // Push the literal part of the format string before the format specifier.
+    // (This may be an empty string if the format specifier is at the
+    // beginning of the string.)
     pushstr(L, fmt, e - fmt);
+    // Check what the character that comes after the percent sign is.
     switch (*(e+1)) {
       case 's': {  /* zero-terminated string */
         const char *s = va_arg(argp, char *);
+        // Render NULL strings as "(null)".
         if (s == NULL) s = "(null)";
         pushstr(L, s, strlen(s));
         break;
@@ -618,55 +635,99 @@ const char *luaO_pushvfstring (lua_State *L, const char *fmt, va_list argp) {
         if (lisprint(cast_uchar(buff)))
           pushstr(L, &buff, 1);
         else  /* non-printable character; print its code */
+          // Recursively call luaO_pushfstring() to format the non-printable
+          // character!
           luaO_pushfstring(L, "<\\%d>", cast_uchar(buff));
         break;
       }
       case 'd': {  /* an 'int' */
+        // Put an int at the top of the stack, then convert it to a string using
+        // the goto. The goto will take care of incrementing L->top.
         setivalue(L->top, va_arg(argp, int));
         goto top2str;
       }
+      // %I is used by lauxlib.c:luaL_tolstring(). Why not just use %d? Maybe
+      // `lua_Integer`s are 64-bit while ints are 32-bit on some machines? So
+      // this is kind of like %ld or %lld?
       case 'I': {  /* a 'lua_Integer' */
         setivalue(L->top, cast(lua_Integer, va_arg(argp, l_uacInt)));
         goto top2str;
       }
       case 'f': {  /* a 'lua_Number' */
         setfltvalue(L->top, cast_num(va_arg(argp, l_uacNumber)));
+        // The %d and %I cases above goto here, to convert the number at L->top
+        // to a lua string.
       top2str:  /* convert the top element to a string */
+        // We didn't increment L->top in the places that goto here, so do that
+        // now.
         luaD_inctop(L);
+        // Convert the number that was at the top of the stack to a string, in
+        // place.
         luaO_tostring(L, L->top - 1);
         break;
       }
       case 'p': {  /* a pointer */
+        // Pointers are formatted in hex, e.g. "0x7fff5db4b9a8" on my machine.
+        // So in the common case, we need 2 chars for each byte and 2 extra
+        // chars for the "0x" prefix, and also a nul char at the end. Here we
+        // allow 4 chars per byte, and 8 extra chars. Yes, that should be
+        // enough. (What are all the possible formats that %p might output with
+        // different sprintf() implementations?)
         char buff[4*sizeof(void *) + 8]; /* should be enough space for a '%p' */
+        // Use sprintf() to format the pointer.
         int l = l_sprintf(buff, sizeof(buff), "%p", va_arg(argp, void *));
         pushstr(L, buff, l);
         break;
       }
       case 'U': {  /* an 'int' as a UTF-8 sequence */
         char buff[UTF8BUFFSZ];
+        // This function converts the Unicode code point to a utf-8 sequence of
+        // bytes that represent that Unicode character. The sequence of bytes is
+        // "right-aligned" in the buffer, such that the last byte in the
+        // sequence is the last byte in the buffer. The function returns the
+        // number of bytes in the sequence, so (buff + UTF8BUFFSZ - l) gets the
+        // first byte of the sequence.
         int l = luaO_utf8esc(buff, cast(long, va_arg(argp, long)));
         pushstr(L, buff + UTF8BUFFSZ - l, l);
         break;
       }
       case '%': {
+        // If it's an escaped percent sign ("%%"), output a single percent sign
+        // char.
         pushstr(L, "%", 1);
         break;
       }
       default: {
+        // If anything else came after a percent sign, it's an error.
+        // luaG_runerror() calls this very function to format the error message,
+        // by the way.
         luaG_runerror(L, "invalid option '%%%c' to 'lua_pushfstring'",
                          *(e + 1));
       }
     }
+    // Each format specifier increases the number of string parts by 2: there's
+    // the literal string that comes before the specifier (which may be an empty
+    // string), the string that the specifier evaluated to.
     n += 2;
+    // Update fmt to point to the part of the format string that comes after the
+    // format specifier we just handled.
     fmt = e+2;
   }
+  // Why call luaD_checkstack() here when luaD_inctop() (called by pushstr())
+  // has already been calling it for us?
   luaD_checkstack(L, 1);
+  // Push the final part of the format string to the stack.
   pushstr(L, fmt, strlen(fmt));
+  // Now, call luaV_concat() which concatenates all `n` strings at the top of
+  // the stack and replaces them with the concatenated string!
   if (n > 0) luaV_concat(L, n + 1);
+  // Return the C string part of the concatenated TString.
   return svalue(L->top - 1);
 }
 
 
+// Variadic version of luaO_pushvfstring() above. Mostly used to format
+// error/debug messages in Lua.
 const char *luaO_pushfstring (lua_State *L, const char *fmt, ...) {
   const char *msg;
   va_list argp;
@@ -676,19 +737,39 @@ const char *luaO_pushfstring (lua_State *L, const char *fmt, ...) {
   return msg;
 }
 
+// The following defines are all used in luaO_chunkid() below.
 
 /* number of chars of a literal string without the ending \0 */
 #define LL(x)	(sizeof(x)/sizeof(char) - 1)
 
+// What does RETS stand for? Is this supposed to be REST..?
 #define RETS	"..."
 #define PRE	"[string \""
 #define POS	"\"]"
 
+// addstr(a,b,l) is just like memcpy(a,b,l), but it multiplies l by sizeof(char)
+// to account for systems that might have a larger char type, and it also
+// increments a by the number of chars copied, to prepare for appending another
+// string to a.
 #define addstr(a,b,l)	( memcpy(a,b,(l) * sizeof(char)), a += (l) )
 
+// A Lua chunk is a unit of compiled Lua source code, whether it's from a file,
+// an eval'd string, or coming from standard input. This function's job is to
+// identify the chunk of Lua code for debugging purposes. `source` can be:
+//
+// * An '@' sign followed by a filename
+// * An '=' sign followed by some Lua code (this is called the 'literal' source.
+//   What is the 'literal' source? I know in the REPL you can write '=2 + 2' for
+//   it to print '4'.)
+// * Or just the Lua code itself, without an '@' or '=' prefix. Is this from
+//   doing an eval? How is this different from the 'literal' source prefixed by
+//   '='? Which does the REPL use?
+//
+// Up to `bufflen` bytes of the chunk id string is written to `out`.
 void luaO_chunkid (char *out, const char *source, size_t bufflen) {
   size_t l = strlen(source);
   if (*source == '=') {  /* 'literal' source */
+    // Write out the Lua code that comes after the '=' sign.
     if (l <= bufflen)  /* small enough? */
       memcpy(out, source + 1, l * sizeof(char));
     else {  /* truncate it */
@@ -697,15 +778,21 @@ void luaO_chunkid (char *out, const char *source, size_t bufflen) {
     }
   }
   else if (*source == '@') {  /* file name */
+    // Write out the filename that comes after the '@' sign.
     if (l <= bufflen)  /* small enough? */
       memcpy(out, source + 1, l * sizeof(char));
     else {  /* add '...' before rest of name */
+      // If not enough space in the buffer, write out a '...' and then the last
+      // part of the filename, as much as can fit. LL() is defined above, it is
+      // basically like strlen() for string constants. RETS is the string "...".
       addstr(out, RETS, LL(RETS));
       bufflen -= LL(RETS);
       memcpy(out, source + 1 + l - bufflen, bufflen * sizeof(char));
     }
   }
   else {  /* string; format as [string "source"] */
+    // Write out '[string "source"]' where "source" contains the first line of
+    // the Lua code (or as much as can fit in the buffer).
     const char *nl = strchr(source, '\n');  /* find first new line (if any) */
     addstr(out, PRE, LL(PRE));  /* add prefix */
     bufflen -= LL(PRE RETS POS) + 1;  /* save space for prefix+suffix+'\0' */
@@ -716,6 +803,7 @@ void luaO_chunkid (char *out, const char *source, size_t bufflen) {
       if (nl != NULL) l = nl - source;  /* stop at first newline */
       if (l > bufflen) l = bufflen;
       addstr(out, source, l);
+      // Print out a '...' to show that there's more code.
       addstr(out, RETS, LL(RETS));
     }
     memcpy(out, POS, (LL(POS) + 1) * sizeof(char));
