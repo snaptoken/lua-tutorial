@@ -109,8 +109,6 @@
 #define luaM_reallocvector(L, v,oldn,n,t) \
    ((v)=cast(t *, luaM_reallocv(L, v, oldn, n, sizeof(t))))
 
-// Throws a runtime error when the number of bytes being allocated wouldn't fit
-// in a size_t.
 LUAI_FUNC l_noret luaM_toobig (lua_State *L);
 
 /* not to be called directly */
