@@ -5,6 +5,11 @@
 ** See Copyright Notice at the end of this file
 */
 
+// This header defines the Lua C API. It's what C programs interfacing with Lua
+// will include. They might also include lauxlib.h which provides higher-level
+// functions that makes interfacing with Lua much easier. But lauxlib implements
+// its API using only the Lua C API defined here, it's built on top of this.
+// This is the basic low-level interface to Lua from C.
 
 #ifndef lua_h
 #define lua_h
@@ -16,11 +21,15 @@
 #include "luaconf.h"
 
 
+// Lua's current version number. This is Lua 5.3.4.
 #define LUA_VERSION_MAJOR	"5"
 #define LUA_VERSION_MINOR	"3"
+// The major and minor version numbers represented as an int, which can be used
+// in comparison expressions.
 #define LUA_VERSION_NUM		503
 #define LUA_VERSION_RELEASE	"4"
 
+// Version/copyright strings printed out by `lua -v` or `luac -v`.
 #define LUA_VERSION	"Lua " LUA_VERSION_MAJOR "." LUA_VERSION_MINOR
 #define LUA_RELEASE	LUA_VERSION "." LUA_VERSION_RELEASE
 #define LUA_COPYRIGHT	LUA_RELEASE "  Copyright (C) 1994-2017 Lua.org, PUC-Rio"
@@ -28,9 +37,16 @@
 
 
 /* mark for precompiled code ('<esc>Lua') */
+// These four bytes appear at the beginning of files containing Lua bytecode, to
+// identify them as such.
 #define LUA_SIGNATURE	"\x1bLua"
 
 /* option for multiple returns in 'lua_pcall' and 'lua_call' */
+// Can be passed as the "number of return values expected" from a function call,
+// instead of specifying an exact number. E.g. with the expression `a, b = f()`
+// exactly 2 return values are expected from `f()`, but with the expression
+// `return f()` it just takes all of the return values that come and returns
+// that many values itself. That's LUA_MULTRET.
 #define LUA_MULTRET	(-1)
 
 
@@ -39,17 +55,30 @@
 ** (-LUAI_MAXSTACK is the minimum valid index; we keep some free empty
 ** space after that to help overflow detection)
 */
+// LUAI_MAXSTACK is defined to be 1_000_000 on most machines, so these are very
+// low negative numbers. They can be used in place of a stack index in many Lua
+// API function calls to refer to either the Lua registry, or a specific
+// upvalue.
 #define LUA_REGISTRYINDEX	(-LUAI_MAXSTACK - 1000)
 #define lua_upvalueindex(i)	(LUA_REGISTRYINDEX - (i))
 
 
 /* thread status */
+// States that Lua threads (coroutines) can be in.
+// LUA_OK means the thread is currently running.
 #define LUA_OK		0
+// LUA_YIELD means the thread has yielded and is not running.
 #define LUA_YIELD	1
+// The rest are error states. This is a runtime error.
 #define LUA_ERRRUN	2
+// Syntax error.
 #define LUA_ERRSYNTAX	3
+// Out of memory error.
 #define LUA_ERRMEM	4
+// Error occurred while running __gc metamethod (finalizer).
 #define LUA_ERRGCMM	5
+// Error occurred while handling another error. Can happen as the result of a C
+// or Lua stack overflow.
 #define LUA_ERRERR	6
 
 
@@ -59,68 +88,108 @@ typedef struct lua_State lua_State;
 /*
 ** basic types
 */
+// Used as a return value for lua_type().
 #define LUA_TNONE		(-1)
 
+// These basic type tags are stored in the bottom 4 bits of a Lua object's type
+// tag field.
 #define LUA_TNIL		0
 #define LUA_TBOOLEAN		1
+// A C pointer. Not garbage-collected.
 #define LUA_TLIGHTUSERDATA	2
+// A float or an int.
 #define LUA_TNUMBER		3
+// A long string or a short (interned) string.
 #define LUA_TSTRING		4
 #define LUA_TTABLE		5
+// A Lua or C closure, or a light C function. Closures are garbage collected,
+// light C functions are just basic function pointers and not garbage collected.
 #define LUA_TFUNCTION		6
+// Garbage collected userdata, usually used to store a C struct you want Lua
+// code to be able to access.
 #define LUA_TUSERDATA		7
+// A coroutine. A lua_State.
 #define LUA_TTHREAD		8
 
+// Number of tags defined above.
 #define LUA_NUMTAGS		9
 
 
 
 /* minimum Lua stack available to a C function */
+// Number of slots guaranteed to be available on top of the stack when Lua calls
+// into a C function.
 #define LUA_MINSTACK	20
 
 
 /* predefined values in the registry */
+// The registry is a Lua table stored in a Lua global state. At the integer
+// index 1, it stores a reference to the main thread (lua_State). At the integer
+// index 2, it stores the table of global variables.
 #define LUA_RIDX_MAINTHREAD	1
 #define LUA_RIDX_GLOBALS	2
+// Number of key-value pairs in the registry table. Used by
+// lstate.c:init_registry() to set the size of the registry table.
 #define LUA_RIDX_LAST		LUA_RIDX_GLOBALS
 
+// The following types are ultimately defined in luaconf.h, based on what it can
+// glean about the architecture it's being compiled on.
 
 /* type of numbers in Lua */
+// Usually `double`.
 typedef LUA_NUMBER lua_Number;
 
 
 /* type for integer functions */
+// Usually `long long` (64-bit int).
 typedef LUA_INTEGER lua_Integer;
 
 /* unsigned integer type */
+// Unsigned version of LUA_INTEGER (so usually `unsigned long long`).
 typedef LUA_UNSIGNED lua_Unsigned;
 
 /* type for continuation-function contexts */
+// `intptr_t` if available, otherwise `ptrdiff_t`. Continuation contexts are
+// numeric values that get passed to a continuation function when calling it.
+// What is the context value used for? (It's hard to find an example in the Lua
+// code itself. Maybe when I get to ldo.c and coroutines.)
 typedef LUA_KCONTEXT lua_KContext;
 
 
 /*
 ** Type for C functions registered with Lua
 */
+// Lua C functions take a lua_State* and return an int (the number of values
+// it's returning that are on top of the stack).
 typedef int (*lua_CFunction) (lua_State *L);
 
 /*
 ** Type for continuation functions
 */
+// Continuation functions are called when resuming a Lua thread (see
+// `ldo.c:resume()`) and when "finishing a C call" (see `ldo.c:finishCcall()`).
+// The `status` is a thread status. `LUA_YIELD` seems to be what's usually
+// passed. What is the `status` telling the continuation function exactly?
 typedef int (*lua_KFunction) (lua_State *L, int status, lua_KContext ctx);
 
 
 /*
 ** Type for functions that read/write blocks when loading/dumping Lua chunks
 */
+// A Zio (from lzio.h) wraps one of these lua_Reader functions to provide all of
+// Lua's buffered stream input needs. A lua_Reader function is expected to read
+// some bytes, return a pointer to the bytes read, and set `*sz` to the number
+// of bytes read.
 typedef const char * (*lua_Reader) (lua_State *L, void *ud, size_t *sz);
 
+// A writer function, similar to lua_Reader (but writes!).
 typedef int (*lua_Writer) (lua_State *L, const void *p, size_t sz, void *ud);
 
 
 /*
 ** Type for memory-allocation functions
 */
+// Used by lmem.c:luaM_realloc_(). An example is l_alloc() in lauxlib.c.
 typedef void * (*lua_Alloc) (void *ud, void *ptr, size_t osize, size_t nsize);
 
 
@@ -128,6 +197,14 @@ typedef void * (*lua_Alloc) (void *ud, void *ptr, size_t osize, size_t nsize);
 /*
 ** generic extra include file
 */
+// Allows a user of the Lua library to insert their own declarations/whatever
+// here. Since lua.h is included by all other Lua files, anything defined here
+// will be visible to all Lua files. What do people actually use this for? What
+// are the possibilities? Here's one example:
+// http://lua-users.org/lists/lua-l/2002-05/msg00012.html
+// But there's no longer a LUA_USERSTATE in the lua_State struct, so that
+// particular example no longer applies. (I guess they replaced LUA_USERSTATE
+// with the LUA_EXTRASPACE and the `LX` struct in `lstate.c`.
 #if defined(LUA_USER_H)
 #include LUA_USER_H
 #endif
@@ -136,6 +213,8 @@ typedef void * (*lua_Alloc) (void *ud, void *ptr, size_t osize, size_t nsize);
 /*
 ** RCS ident string
 */
+// RCS is a version control system. See the definition of lua_ident in lapi.c.
+// What is this useful for?
 extern const char lua_ident[];
 
 
