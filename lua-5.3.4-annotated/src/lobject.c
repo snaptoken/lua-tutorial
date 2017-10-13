@@ -552,7 +552,7 @@ int luaO_utf8esc (char *buff, unsigned long x) {
 // Used by luaO_pushvfstring() below. Also by the Lua API function
 // lua_tolstring(). Note that StkId is just a TValue*, but it's understood that
 // it's a pointer into a Lua stack (array of `TValue`s). This function replaces
-// The numeric TValue at the given stack slot with a string TValue.
+// the numeric TValue at the given stack slot with a string TValue.
 void luaO_tostring (lua_State *L, StkId obj) {
   char buff[MAXNUMBER2STR];
   size_t len;
