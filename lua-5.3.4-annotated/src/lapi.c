@@ -31,52 +31,100 @@
 
 
 
+// Ident string for RCS. RCS is a version control system. What is this useful
+// for exactly?
 const char lua_ident[] =
   "$LuaVersion: " LUA_COPYRIGHT " $"
   "$LuaAuthors: " LUA_AUTHORS " $";
 
 
 /* value at a non-valid index */
+// This is a special value returned by index2addr() below to indicate that the
+// given index wasn't valid.
 #define NONVALIDVALUE		cast(TValue *, luaO_nilobject)
 
 /* corresponding test */
+// Checks whether index2addr() returned a valid object, rather than
+// NONVALIDVALUE. luaO_nilobject is located in static memory, so its address can
+// be used as a sentinel value to indicate an invalid stack index. index2addr()
+// only returns pointers into the stack, the registry, or upvalues when the
+// index is valid. Note that a valid stack index might point to a nil object,
+// but it will be a different nil object from luaO_nilobject.
 #define isvalid(o)	((o) != luaO_nilobject)
 
 /* test for pseudo index */
+// LUA_REGISTRYINDEX is a special stack index that uses the registry value in
+// the global state instead of a slot in the stack. Upvalues are also specified
+// by special stack indexes, which are less than LUA_REGISTRYINDEX (which is a
+// very low negative integer).
 #define ispseudo(i)		((i) <= LUA_REGISTRYINDEX)
 
 /* test for upvalue */
+// Upvalue indexes are strictly lower than LUA_REGISTRYINDEX. (And anything
+// higher than LUA_REGISTRYINDEX is a potentially valid stack index.)
 #define isupvalue(i)		((i) < LUA_REGISTRYINDEX)
 
 /* test for valid but not pseudo index */
+// Only used in the api_checkstackindex() macro below.
 #define isstackindex(i, o)	(isvalid(o) && !ispseudo(i))
 
+// Assert that `o` isn't a NONVALIDVALUE. Only used in lua_copy() to check the
+// destination address of the copy.
 #define api_checkvalidindex(l,o)  api_check(l, isvalid(o), "invalid index")
 
+// Assert that `i` is a stack index (not a pseudo index) and that `o` isn't a
+// NONVALIDVALUE. Only used in lua_rotate() and lua_pcallk().
 #define api_checkstackindex(l, i, o)  \
 	api_check(l, isstackindex(i, o), "index not in the stack")
 
 
+// Convert a stack (or pseudo) index to a pointer to the actual TValue it refers
+// to. This is a pointer into the stack itself (if a stack index) or a pointer
+// to the global registry or to an upvalue (if a pseudo index). Most Lua API
+// functions take one more stack indexes as arguments, so this function is used
+// all over the rest of this file.
 static TValue *index2addr (lua_State *L, int idx) {
+  // Get current stack frame.
   CallInfo *ci = L->ci;
+  // Positive indexes are relative to the base stack slot of this stack frame,
+  // which is ci->func.
   if (idx > 0) {
     TValue *o = ci->func + idx;
+    // Assert that the index doesn't point outside of the current stack frame.
     api_check(L, idx <= ci->top - (ci->func + 1), "unacceptable index");
+    // Return NONVALIDVALUE if the index points past the top of the stack.
     if (o >= L->top) return NONVALIDVALUE;
     else return o;
   }
+  // Negative indexes are relative to the top of hte stack, so -1 refers to the
+  // last thing pushed to the stack, -2 refers to the thing pushed before that,
+  // and so on. Pseudo indexes are also negative, and can be differentiated from
+  // stack indexes by seeing if they are <= LUA_REGISTRYINDEX (which ispseudo()
+  // does).
   else if (!ispseudo(idx)) {  /* negative index */
+    // Assert that the index refers to a stack slot above ci->func (which is the
+    // base of the current stack frame). Also make sure the index isn't 0, which
+    // has no meaning in the Lua API and should never be passed as an index.
     api_check(L, idx != 0 && -idx <= L->top - (ci->func + 1), "invalid index");
     return L->top + idx;
   }
+  // If the index is LUA_REGISTRYINDEX, then just return a pointer to the global
+  // registry value.
   else if (idx == LUA_REGISTRYINDEX)
     return &G(L)->l_registry;
+  // Otherwise the index must be < LUA_REGISTRYINDEX, which means it refers to
+  // an upvalue of the current function.
   else {  /* upvalues */
     idx = LUA_REGISTRYINDEX - idx;
     api_check(L, idx <= MAXUPVAL + 1, "upvalue index too large");
+    // Only C closure and Lua closures have upvalues. Light C functions are just
+    // C pointers, basic non-garbage-collected values, so they don't contain
+    // upvalues.
     if (ttislcf(ci->func))  /* light C function? */
       return NONVALIDVALUE;  /* it has no upvalues */
     else {
+      // It has to be a C closure (not a Lua closure) since index2addr() is only
+      // used by the Lua C API.
       CClosure *func = clCvalue(ci->func);
       return (idx <= func->nupvalues) ? &func->upvalue[idx-1] : NONVALIDVALUE;
     }
@@ -88,26 +136,42 @@ static TValue *index2addr (lua_State *L, int idx) {
 ** to be called by 'lua_checkstack' in protected mode, to grow stack
 ** capturing memory errors
 */
+// The `ud` (userdata) argument points to the total size the stack needs to be.
+// luaD_growstack() will either double the amount of allocated stack, or if
+// that's not enough it will allocate the exact amount requested.
 static void growstack (lua_State *L, void *ud) {
   int size = *(int *)ud;
   luaD_growstack(L, size);
 }
 
 
+// Ensures there is enough allocated stack to push `n` more elements, by
+// reallocating a larger stack if necessary. Returns 1 if `n` stack slots are
+// available, 0 if the stack wasn't able to grow large enough to hold `n` more
+// elements (due to the LUAI_MAXSTACK limit or a memory allocation error).
 LUA_API int lua_checkstack (lua_State *L, int n) {
   int res;
   CallInfo *ci = L->ci;
   lua_lock(L);
   api_check(L, n >= 0, "negative 'n'");
+  // L->top points to the first free slot, and L->stack_last points one past the
+  // last free slot, so subtracting them gets the number of free slots in the
+  // stack, which we want to be at least n+1 (so that after `n` values are
+  // pushed, L->top will still point to a valid free slot).
   if (L->stack_last - L->top > n)  /* stack large enough? */
     res = 1;  /* yes; check is OK */
   else {  /* no; need to grow stack */
+    // L->top points one past the last stack slot in use, so subtracting the
+    // first slot (L->stack) from it gets the number of slots in use.
     int inuse = cast_int(L->top - L->stack) + EXTRA_STACK;
     if (inuse > LUAI_MAXSTACK - n)  /* can grow without overflow? */
       res = 0;  /* no */
     else  /* try to grow stack */
+      // Run the growstack() auxiliary function defined above in protected mode
+      // to catch any memory allocation errors.
       res = (luaD_rawrunprotected(L, &growstack, &n) == LUA_OK);
   }
+  // Update the maximum stack index for the current stack frame, if necessary.
   if (res && ci->top < L->top + n)
     ci->top = L->top + n;  /* adjust frame top */
   lua_unlock(L);
@@ -115,14 +179,23 @@ LUA_API int lua_checkstack (lua_State *L, int n) {
 }
 
 
+// Moves `n` values from the top of one lua_State to the top of another
+// lua_State. Assumes (with an assertion) that there is enough stack space in
+// the destination stack frame to push `n` elements to it.
 LUA_API void lua_xmove (lua_State *from, lua_State *to, int n) {
   int i;
+  // If the source is the same as the destination, nothing needs to be done.
   if (from == to) return;
   lua_lock(to);
+  // Assert that the source stack has `n` elements pushed to it.
   api_checknelems(from, n);
+  // Assert that the `lua_State`s have the same global_State.
   api_check(from, G(from) == G(to), "moving among independent states");
+  // Assert that the destination has `n` free stack slots in its stack frame.
   api_check(from, to->ci->top - to->top >= n, "stack overflow");
+  // Pop values from source stack.
   from->top -= n;
+  // Push values to destination stack.
   for (i = 0; i < n; i++) {
     setobj2s(to, to->top, from->top + i);
     to->top++;  /* stack already checked by previous 'api_check' */
@@ -131,6 +204,10 @@ LUA_API void lua_xmove (lua_State *from, lua_State *to, int n) {
 }
 
 
+// Registers panicf as the panic function for the global_State that the given
+// lua_State belongs to. Returns the old panic function. The panic function is
+// called when a Lua error is thrown and nothing catches it (i.e. when an error
+// occurs during a completely unprotected call into Lua code).
 LUA_API lua_CFunction lua_atpanic (lua_State *L, lua_CFunction panicf) {
   lua_CFunction old;
   lua_lock(L);
@@ -141,6 +218,8 @@ LUA_API lua_CFunction lua_atpanic (lua_State *L, lua_CFunction panicf) {
 }
 
 
+// Gets the LUA_VERSION_NUM, which is currently 503 for "Lua 5.3.x". Useful for
+// doing comparisons to know what features are available.
 LUA_API const lua_Number *lua_version (lua_State *L) {
   static const lua_Number version = LUA_VERSION_NUM;
   if (L == NULL) return &version;

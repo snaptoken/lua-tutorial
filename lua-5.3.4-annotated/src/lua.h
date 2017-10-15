@@ -213,8 +213,6 @@ typedef void * (*lua_Alloc) (void *ud, void *ptr, size_t osize, size_t nsize);
 /*
 ** RCS ident string
 */
-// RCS is a version control system. See the definition of lua_ident in lapi.c.
-// What is this useful for?
 extern const char lua_ident[];
 
 
