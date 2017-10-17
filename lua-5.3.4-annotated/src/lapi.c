@@ -237,27 +237,45 @@ LUA_API const lua_Number *lua_version (lua_State *L) {
 ** convert an acceptable stack index into an absolute index
 */
 LUA_API int lua_absindex (lua_State *L, int idx) {
+  // Pseudo indexes stay the same, and positive indexes are already absolute
+  // (relative to the current stack frame). Only negative indexes need to be
+  // converted, by getting the absolute index of the stack top and then adding
+  // the negative index to that.
   return (idx > 0 || ispseudo(idx))
          ? idx
          : cast_int(L->top - L->ci->func) + idx;
 }
 
 
+// Get the stack index of the top element of the stack (in the current stack
+// frame, as always).
 LUA_API int lua_gettop (lua_State *L) {
   return cast_int(L->top - (L->ci->func + 1));
 }
 
 
+// Set the top of the stack to the given stack index. Causes elements to be
+// popped off of the stack, or nil values to be pushed. `idx` may be positive or
+// negative. It can also be 0, which empties the stack (so only the function
+// remains at the base of the stack).
 LUA_API void lua_settop (lua_State *L, int idx) {
   StkId func = L->ci->func;
   lua_lock(L);
   if (idx >= 0) {
+    // Assert that enough stack has been allocated to accomodate the new top. (A
+    // certain amount of stack is guaranteed to be available at all times. Isn't
+    // that what L->ci->top is for? Why isn't it involved in this check?)
     api_check(L, idx <= L->stack_last - (func + 1), "new top too large");
+    // Fill any intervening stack slots with nil values.
     while (L->top < (func + 1) + idx)
       setnilvalue(L->top++);
+    // Set the new top.
     L->top = (func + 1) + idx;
   }
   else {
+    // For negative indexes, check that they don't go below the current stack
+    // frame. You can use a negative index that points to L->ci->func (the base
+    // of the stack frame) to clear the stack.
     api_check(L, -(idx+1) <= (L->top - (func + 1)), "invalid new top");
     L->top += idx+1;  /* 'subtract' index (index is negative) */
   }
@@ -269,7 +287,11 @@ LUA_API void lua_settop (lua_State *L, int idx) {
 ** Reverse the stack segment from 'from' to 'to'
 ** (auxiliary to 'lua_rotate')
 */
+// Private function used by lua_rotate() below. Reverses the subarray of the
+// stack between `from` and `to` inclusive.
 static void reverse (lua_State *L, StkId from, StkId to) {
+  // Swap the first and last values in the segment, then the second and second
+  // last values, and so on, to reverse the segment.
   for (; from < to; from++, to--) {
     TValue temp;
     setobj(L, &temp, from);
@@ -283,14 +305,31 @@ static void reverse (lua_State *L, StkId from, StkId to) {
 ** Let x = AB, where A is a prefix of length 'n'. Then,
 ** rotate x n == BA. But BA == (A^r . B^r)^r.
 */
+// Shifts a subarray of the stack (from `idx` to the top of the stack) `n`
+// places to the right (or left if `n` is negative). Mainly used to define the
+// lua_insert() and lua_remove() macros in lua.h, but also sometimes directly
+// used to reorder the top few elements of the stack the way another function
+// expects to find them.
+//
+// The rotate is performed in an interesting way: The last `n` elements are
+// reversed in place, the rest of the beginning of the subarray is reversed in
+// place, and finally the whole subarray is reversed in place. This way, a
+// rotate operation takes the same amount of time no matter what `n` is.
 LUA_API void lua_rotate (lua_State *L, int idx, int n) {
+  // The segment to be rotated starts at `p` (prefix) and ends at `t` (top). `m`
+  // is the "midpoint" of the segment such that there are `n` elements from `m`
+  // (exclusive) to `t` (inclusive).
   StkId p, t, m;
   lua_lock(L);
   t = L->top - 1;  /* end of stack segment being rotated */
   p = index2addr(L, idx);  /* start of segment */
+  // Assert that `idx` isn't a pseudo index and is valid stack index.
   api_checkstackindex(L, idx, p);
+  // Assert that there are no more than `n` elements in the segment being
+  // rotated.
   api_check(L, (n >= 0 ? n : -n) <= (t - p + 1), "invalid 'n'");
   m = (n >= 0 ? t - n : p - n - 1);  /* end of prefix */
+  // I don't think the prefix has length 'n', the suffix does. Right?
   reverse(L, p, m);  /* reverse the prefix with length 'n' */
   reverse(L, m + 1, t);  /* reverse the suffix */
   reverse(L, p, t);  /* reverse the entire segment */
@@ -298,13 +337,22 @@ LUA_API void lua_rotate (lua_State *L, int idx, int n) {
 }
 
 
+// Think of this as a "mov" instruction and `fromidx` and `toidx` as registers.
+// Simply copies the value in `fromidx` to the `toidx` slot in the stack.
 LUA_API void lua_copy (lua_State *L, int fromidx, int toidx) {
   TValue *fr, *to;
   lua_lock(L);
   fr = index2addr(L, fromidx);
+  // If `fromidx` is invalid, `fr` will point to a nil object, and so nil will
+  // get copied to `to`. So we won't bother validating `fromidx`.
   to = index2addr(L, toidx);
+  // Validate `toidx` to make sure `to` points to a stack slot we can write to.
   api_checkvalidindex(L, to);
+  // Do the copy.
   setobj(L, to, fr);
+  // If we overwrote an upvalue, do a GC barrier on the new value and the
+  // current function (which now references the value since upvalues are owned
+  // by functions). I need to come back to this, why are these barriers needed?
   if (isupvalue(toidx))  /* function upvalue? */
     luaC_barrier(L, clCvalue(L->ci->func), fr);
   /* LUA_REGISTRYINDEX does not need gc barrier
@@ -313,9 +361,12 @@ LUA_API void lua_copy (lua_State *L, int fromidx, int toidx) {
 }
 
 
+// Push the value at the given stack index to the top of the stack.
 LUA_API void lua_pushvalue (lua_State *L, int idx) {
   lua_lock(L);
+  // If `idx` is invalid, nil will be pushed.
   setobj2s(L, L->top, index2addr(L, idx));
+  // Increments L->top.
   api_incr_top(L);
   lua_unlock(L);
 }
