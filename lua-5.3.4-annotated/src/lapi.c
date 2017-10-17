@@ -378,31 +378,41 @@ LUA_API void lua_pushvalue (lua_State *L, int idx) {
 */
 
 
+// Get the basic type tag of a Lua value (e.g. LUA_TNUMBER). Returns LUA_TNONE
+// (-1) if the `idx` is invalid.
 LUA_API int lua_type (lua_State *L, int idx) {
   StkId o = index2addr(L, idx);
   return (isvalid(o) ? ttnov(o) : LUA_TNONE);
 }
 
 
+// Converts a basic type tag (e.g. LUA_TNUMBER) to a human-readable C string
+// (e.g. "number"), as defined by ltm.c:luaT_typenames_. LUA_TNONE converts to
+// the string "no value".
 LUA_API const char *lua_typename (lua_State *L, int t) {
   UNUSED(L);
   api_check(L, LUA_TNONE <= t && t < LUA_NUMTAGS, "invalid tag");
+  // Look up the type name in the static luaT_typenames_ table defined in ltm.c.
   return ttypename(t);
 }
 
 
+// Check if a value is a light C function or C closure.
 LUA_API int lua_iscfunction (lua_State *L, int idx) {
   StkId o = index2addr(L, idx);
   return (ttislcf(o) || (ttisCclosure(o)));
 }
 
 
+// Check if a value is an integer (not a float).
 LUA_API int lua_isinteger (lua_State *L, int idx) {
   StkId o = index2addr(L, idx);
   return ttisinteger(o);
 }
 
 
+// Check if a value is a number, or can be converted to a number. (So integers,
+// floats, and numeric strings.)
 LUA_API int lua_isnumber (lua_State *L, int idx) {
   lua_Number n;
   const TValue *o = index2addr(L, idx);
@@ -410,47 +420,68 @@ LUA_API int lua_isnumber (lua_State *L, int idx) {
 }
 
 
+// Check if a value is a string, or can be converted to a string. (Numbers can
+// act as strings if LUA_NOCVTN2S isn't defined. See `lvm.h:cvt2str()`.)
 LUA_API int lua_isstring (lua_State *L, int idx) {
   const TValue *o = index2addr(L, idx);
   return (ttisstring(o) || cvt2str(o));
 }
 
 
+// Check if a value is light userdata or "full" userdata.
 LUA_API int lua_isuserdata (lua_State *L, int idx) {
   const TValue *o = index2addr(L, idx);
   return (ttisfulluserdata(o) || ttislightuserdata(o));
 }
 
 
+// Check if two values are "raw equal", meaning the __eq() tag method will be
+// ignored.
 LUA_API int lua_rawequal (lua_State *L, int index1, int index2) {
   StkId o1 = index2addr(L, index1);
   StkId o2 = index2addr(L, index2);
+  // Always return false if one or both stack indexes are invalid. Otherwise,
+  // calls lvm.c:luaV_equalobj() passing NULL for the lua_State argument to
+  // indicate tag methods shouldn't be considered.
   return (isvalid(o1) && isvalid(o2)) ? luaV_rawequalobj(o1, o2) : 0;
 }
 
 
+// Perform an arithmetic operation on the top two (or one for unary operations)
+// values on the stack, replacing them with the result value.
 LUA_API void lua_arith (lua_State *L, int op) {
   lua_lock(L);
+  // Unary minus and bitwise-NOT are the only two unary operators.
   if (op != LUA_OPUNM && op != LUA_OPBNOT)
     api_checknelems(L, 2);  /* all other operations expect two operands */
   else {  /* for unary operations, add fake 2nd operand */
     api_checknelems(L, 1);
+    // Just duplicate the single operand so there's two copies of them on the
+    // stack. We'll still only use one of them, then overwrite both with the
+    // result like we would for a binary operator.
     setobjs2s(L, L->top, L->top - 1);
     api_incr_top(L);
   }
   /* first operand at top - 2, second at top - 1; result go to top - 2 */
   luaO_arith(L, op, L->top - 2, L->top - 1, L->top - 2);
+  // We overwrote the first operand with the result, now we pop the second
+  // operand off the stack, leaving just the result in place of the two
+  // operands.
   L->top--;  /* remove second operand */
   lua_unlock(L);
 }
 
 
+// Perform a comparison operation on the two given values, returning 1 if the
+// comparison is true and 0 if false. Three operations are handled: LUA_OPEQ
+// (equality), LUA_OPLT (less than), and LUA_OPLE (less than or equal).
 LUA_API int lua_compare (lua_State *L, int index1, int index2, int op) {
   StkId o1, o2;
   int i = 0;
   lua_lock(L);  /* may call tag method */
   o1 = index2addr(L, index1);
   o2 = index2addr(L, index2);
+  // False is returned by default if either index is invalid.
   if (isvalid(o1) && isvalid(o2)) {
     switch (op) {
       case LUA_OPEQ: i = luaV_equalobj(L, o1, o2); break;
@@ -464,6 +495,8 @@ LUA_API int lua_compare (lua_State *L, int index1, int index2, int op) {
 }
 
 
+// Converts a C string to a Lua number, pushing the result to the stack if
+// successful. Returns the string size on success, and 0 on failure.
 LUA_API size_t lua_stringtonumber (lua_State *L, const char *s) {
   size_t sz = luaO_str2num(s, L->top);
   if (sz != 0)
@@ -472,6 +505,10 @@ LUA_API size_t lua_stringtonumber (lua_State *L, const char *s) {
 }
 
 
+// Converts a Lua value to a C float, returning the result. `pisnum` gets set to
+// 1 if the value was able to be converted to a float, otherwise is set to 0.
+// NULL may be passed for `pisnum`, as is the case with the lua_tonumber()
+// macro.
 LUA_API lua_Number lua_tonumberx (lua_State *L, int idx, int *pisnum) {
   lua_Number n;
   const TValue *o = index2addr(L, idx);
@@ -483,6 +520,9 @@ LUA_API lua_Number lua_tonumberx (lua_State *L, int idx, int *pisnum) {
 }
 
 
+// Converts a Lua value to a C int, returning the result. `pisnum` gets set to 1
+// if the value was able to be converted to an int, otherwise is set to 0. NULL
+// may be passed for `pisnum`, as is the case with the lua_tointeger() macro.
 LUA_API lua_Integer lua_tointegerx (lua_State *L, int idx, int *pisnum) {
   lua_Integer res;
   const TValue *o = index2addr(L, idx);
@@ -494,12 +534,18 @@ LUA_API lua_Integer lua_tointegerx (lua_State *L, int idx, int *pisnum) {
 }
 
 
+// Returns 1 if the given Lua value is truthy, or 0 if falsy. Only nil and false
+// are falsy in Lua. (See `lobject.h:l_isfalse()`.)
 LUA_API int lua_toboolean (lua_State *L, int idx) {
   const TValue *o = index2addr(L, idx);
   return !l_isfalse(o);
 }
 
 
+// Converts a Lua value to a string. If successful, the value at the given stack
+// index is replaced with the Lua string, and a pointer to the C string is
+// returned. Otherwise NULL is returned. `len` is set to the length of the
+// string, or 0 on failure.
 LUA_API const char *lua_tolstring (lua_State *L, int idx, size_t *len) {
   StkId o = index2addr(L, idx);
   if (!ttisstring(o)) {
@@ -509,16 +555,24 @@ LUA_API const char *lua_tolstring (lua_State *L, int idx, size_t *len) {
     }
     lua_lock(L);  /* 'luaO_tostring' may create a new string */
     luaO_tostring(L, o);
+    // Does one step of garbage collection (`lgc.c:luaC_step()`) if the GC debt
+    // is positive. Why is this here?
     luaC_checkGC(L);
+    // Recalculate the address of `o` since the stack might have a different
+    // address after doing GC.
     o = index2addr(L, idx);  /* previous call may reallocate the stack */
     lua_unlock(L);
   }
+  // Set `len` to the string length, unless NULL was passed for `len`.
   if (len != NULL)
     *len = vslen(o);
+  // Return the C string contained by `o`.
   return svalue(o);
 }
 
 
+// Gets length of string, table, or userdata without considering the __len()
+// metamethod (which normally lets you override the `#` operator).
 LUA_API size_t lua_rawlen (lua_State *L, int idx) {
   StkId o = index2addr(L, idx);
   switch (ttype(o)) {
@@ -531,6 +585,8 @@ LUA_API size_t lua_rawlen (lua_State *L, int idx) {
 }
 
 
+// Get the C function pointer from a Lua C function object, whether it's a light
+// C function or a C closure. Returns NULL if the value isn't a C function.
 LUA_API lua_CFunction lua_tocfunction (lua_State *L, int idx) {
   StkId o = index2addr(L, idx);
   if (ttislcf(o)) return fvalue(o);
@@ -540,6 +596,9 @@ LUA_API lua_CFunction lua_tocfunction (lua_State *L, int idx) {
 }
 
 
+// Get a void pointer to the data of a userdata object, whether it's a light
+// userdata (just a C pointer) or a "full" userdata (owns its own data). Returns
+// NULL for values that aren't userdata.
 LUA_API void *lua_touserdata (lua_State *L, int idx) {
   StkId o = index2addr(L, idx);
   switch (ttnov(o)) {
@@ -550,21 +609,31 @@ LUA_API void *lua_touserdata (lua_State *L, int idx) {
 }
 
 
+// Gets the lua_State* that a Lua thread object contains. Returns NULL if the
+// value isn't a Lua thread object.
 LUA_API lua_State *lua_tothread (lua_State *L, int idx) {
   StkId o = index2addr(L, idx);
   return (!ttisthread(o)) ? NULL : thvalue(o);
 }
 
 
+// Gets a void pointer to
 LUA_API const void *lua_topointer (lua_State *L, int idx) {
   StkId o = index2addr(L, idx);
   switch (ttype(o)) {
+    // Pointer to Table struct.
     case LUA_TTABLE: return hvalue(o);
+    // Pointer to LClosure struct.
     case LUA_TLCL: return clLvalue(o);
+    // Pointer to CClosure struct.
     case LUA_TCCL: return clCvalue(o);
+    // What, a function pointer can't be casted directly to `void*`?
     case LUA_TLCF: return cast(void *, cast(size_t, fvalue(o)));
+    // Pointer to lua_State struct.
     case LUA_TTHREAD: return thvalue(o);
+    // Pointer to the data contained by the userdata object.
     case LUA_TUSERDATA: return getudatamem(uvalue(o));
+    // Just a pointer.
     case LUA_TLIGHTUSERDATA: return pvalue(o);
     default: return NULL;
   }
