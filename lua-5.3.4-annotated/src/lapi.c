@@ -617,7 +617,9 @@ LUA_API lua_State *lua_tothread (lua_State *L, int idx) {
 }
 
 
-// Gets a void pointer to
+// Gets a pointer to the C structure representing the given object. Used by
+// lauxlib.c:luaL_tolstring() as a last resort to convert an object to a string
+// representation suitable for debugging or printing out in the Lua REPL.
 LUA_API const void *lua_topointer (lua_State *L, int idx) {
   StkId o = index2addr(L, idx);
   switch (ttype(o)) {
@@ -646,6 +648,7 @@ LUA_API const void *lua_topointer (lua_State *L, int idx) {
 */
 
 
+// Push a nil value to the stack.
 LUA_API void lua_pushnil (lua_State *L) {
   lua_lock(L);
   setnilvalue(L->top);
@@ -654,6 +657,7 @@ LUA_API void lua_pushnil (lua_State *L) {
 }
 
 
+// Push a float to the stack.
 LUA_API void lua_pushnumber (lua_State *L, lua_Number n) {
   lua_lock(L);
   setfltvalue(L->top, n);
@@ -662,6 +666,7 @@ LUA_API void lua_pushnumber (lua_State *L, lua_Number n) {
 }
 
 
+// Push an int to the stack.
 LUA_API void lua_pushinteger (lua_State *L, lua_Integer n) {
   lua_lock(L);
   setivalue(L->top, n);
@@ -681,12 +686,18 @@ LUA_API const char *lua_pushlstring (lua_State *L, const char *s, size_t len) {
   ts = (len == 0) ? luaS_new(L, "") : luaS_newlstr(L, s, len);
   setsvalue2s(L, L->top, ts);
   api_incr_top(L);
+  // Do one step of garbage collection if GC debt is positive. Why? Because we
+  // just allocated some memory?
   luaC_checkGC(L);
   lua_unlock(L);
   return getstr(ts);
 }
 
 
+// Like lua_pushlstring() above, but the length of the string is found via
+// strlen(). It also uses luaS_new() to create the string object, which uses the
+// string cache to quickly return interned strings that have already been
+// created from the same string pointer `s`.
 LUA_API const char *lua_pushstring (lua_State *L, const char *s) {
   lua_lock(L);
   if (s == NULL)
@@ -704,6 +715,7 @@ LUA_API const char *lua_pushstring (lua_State *L, const char *s) {
 }
 
 
+// Push formatted string to the stack.
 LUA_API const char *lua_pushvfstring (lua_State *L, const char *fmt,
                                       va_list argp) {
   const char *ret;
@@ -715,6 +727,7 @@ LUA_API const char *lua_pushvfstring (lua_State *L, const char *fmt,
 }
 
 
+// Variadic version of the above function.
 LUA_API const char *lua_pushfstring (lua_State *L, const char *fmt, ...) {
   const char *ret;
   va_list argp;
@@ -728,8 +741,13 @@ LUA_API const char *lua_pushfstring (lua_State *L, const char *fmt, ...) {
 }
 
 
+// Push a new C closure with `n` upvalues onto the stack. If `n` is 0, a light
+// C function (just a function pointer, non-garbage-collected) will be pushed
+// instead. The upvalues' initial values will be set to the top `n` values on
+// the stack, in order.
 LUA_API void lua_pushcclosure (lua_State *L, lua_CFunction fn, int n) {
   lua_lock(L);
+  // If no upvalues needed, just push a light C function.
   if (n == 0) {
     setfvalue(L->top, fn);
   }
@@ -737,13 +755,20 @@ LUA_API void lua_pushcclosure (lua_State *L, lua_CFunction fn, int n) {
     CClosure *cl;
     api_checknelems(L, n);
     api_check(L, n <= MAXUPVAL, "upvalue index too large");
+    // A C closure is just a function pointer and an array of `TValue`s (the
+    // upvalues).
     cl = luaF_newCclosure(L, n);
+    // Set the function pointer.
     cl->f = fn;
+    // Copy the upvalues' values from the top `n` elements of the stack, in
+    // order.
     L->top -= n;
     while (n--) {
       setobj2n(L, &cl->upvalue[n], L->top + n);
       /* does not need barrier because closure is white */
     }
+    // We popped all the values off the stack with `L->top -= n` above. Now push
+    // the new C closure to the top of the stack as the result.
     setclCvalue(L, L->top, cl);
   }
   api_incr_top(L);
@@ -752,6 +777,7 @@ LUA_API void lua_pushcclosure (lua_State *L, lua_CFunction fn, int n) {
 }
 
 
+// Push a boolean to the stack.
 LUA_API void lua_pushboolean (lua_State *L, int b) {
   lua_lock(L);
   setbvalue(L->top, (b != 0));  /* ensure that true is 1 */
@@ -760,6 +786,7 @@ LUA_API void lua_pushboolean (lua_State *L, int b) {
 }
 
 
+// Push a light userdata (a void pointer) to the stack.
 LUA_API void lua_pushlightuserdata (lua_State *L, void *p) {
   lua_lock(L);
   setpvalue(L->top, p);
@@ -768,6 +795,9 @@ LUA_API void lua_pushlightuserdata (lua_State *L, void *p) {
 }
 
 
+// Push a Lua thread (a lua_State*) to the stack. (To its own stack.) Returns
+// true if L is the main thread. Is there a way to push a thread to another
+// thread's stack?
 LUA_API int lua_pushthread (lua_State *L) {
   lua_lock(L);
   setthvalue(L, L->top, L);
