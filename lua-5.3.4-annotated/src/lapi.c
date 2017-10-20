@@ -1038,19 +1038,32 @@ LUA_API int lua_getuservalue (lua_State *L, int idx) {
 /*
 ** set functions (stack -> Lua)
 */
+// The functions in this section are exactly parallel to the functions in the
+// above section. Only these are setters, the above section contains getters. So
+// I'll annotate the functions in this section more lightly, since a lot of what
+// they do has been explained in the corresponding getter functions above.
 
 /*
 ** t[k] = value at the top of the stack (where 'k' is a string)
 */
+// Used by lua_setglobal() and lua_setfield() below.
 static void auxsetstr (lua_State *L, const TValue *t, const char *k) {
   const TValue *slot;
   TString *str = luaS_new(L, k);
+  // Assert that a value exists at the top of the stack before we use it.
   api_checknelems(L, 1);
+  // If the key already exists in the table, this sets it to the new value.
+  // Otherwise, if it's a table and the key doesn't exist, this sets `slot` to
+  // point to the slot where the value should be inserted (but first we need to
+  // call the __newindex() tag method). If it's not a table, the __newindex()
+  // tag method needs to be called instead, and `slot` is set to NULL.
   if (luaV_fastset(L, t, str, slot, luaH_getstr, L->top - 1))
     L->top--;  /* pop value */
   else {
     setsvalue2s(L, L->top, str);  /* push 'str' (to make it a TValue) */
     api_incr_top(L);
+    // Try the __newindex() tag method. If the tag method doesn't exist, create
+    // the key in the table and assign it the value.
     luaV_finishset(L, t, L->top - 1, L->top - 2, slot);
     L->top -= 2;  /* pop value and key */
   }
@@ -1058,6 +1071,8 @@ static void auxsetstr (lua_State *L, const TValue *t, const char *k) {
 }
 
 
+// Set the global variable with the given name to the value at the top of the
+// stack (and popping the value off the stack afterwards).
 LUA_API void lua_setglobal (lua_State *L, const char *name) {
   Table *reg = hvalue(&G(L)->l_registry);
   lua_lock(L);  /* unlock done in 'auxsetstr' */
@@ -1065,6 +1080,9 @@ LUA_API void lua_setglobal (lua_State *L, const char *name) {
 }
 
 
+// This function expects a key and a value to be pushed to the stack, in that
+// order. Then it assigns the value to the key in the table at the given index.
+// Both the key and value are popped off the stack afterwards.
 LUA_API void lua_settable (lua_State *L, int idx) {
   StkId t;
   lua_lock(L);
@@ -1076,12 +1094,17 @@ LUA_API void lua_settable (lua_State *L, int idx) {
 }
 
 
+// Sets the field `k` of the table at the given index to the value at the top of
+// the stack, popping the value off the stack afterwards.
 LUA_API void lua_setfield (lua_State *L, int idx, const char *k) {
   lua_lock(L);  /* unlock done in 'auxsetstr' */
   auxsetstr(L, index2addr(L, idx), k);
 }
 
 
+// Set the value in the table with the given index with the integer key `n` to
+// the value at the top of the stack, popping the value off the stack
+// afterwards.
 LUA_API void lua_seti (lua_State *L, int idx, lua_Integer n) {
   StkId t;
   const TValue *slot;
@@ -1100,6 +1123,7 @@ LUA_API void lua_seti (lua_State *L, int idx, lua_Integer n) {
 }
 
 
+// Like lua_settable() above, but ignore the __newindex() metamethod.
 LUA_API void lua_rawset (lua_State *L, int idx) {
   StkId o;
   TValue *slot;
@@ -1109,13 +1133,22 @@ LUA_API void lua_rawset (lua_State *L, int idx) {
   api_check(L, ttistable(o), "table expected");
   slot = luaH_set(L, hvalue(o), L->top - 2);
   setobj2t(L, slot, L->top - 1);
+  // Clears all the flags that cache the nonexistence of each tag method of a
+  // table object. (Flags in the tag method cache are set to 1 if that tag
+  // method doesn't exist, so then the tag method doesn't have to be searched
+  // for when doing otherwise simple operations like arithmetic, table lookups,
+  // etc.). Normally, luaV_finishset() takes care of invalidating the cache, but
+  // this is a raw set.
   invalidateTMcache(hvalue(o));
+  // If the table is marked black, and the value is marked white, mark the table
+  // gray again. (Why?) This is also normally taken care of by luaV_finishset().
   luaC_barrierback(L, hvalue(o), L->top-1);
   L->top -= 2;
   lua_unlock(L);
 }
 
 
+// Like lua_seti() above, but ignore the __newindex() metamethod.
 LUA_API void lua_rawseti (lua_State *L, int idx, lua_Integer n) {
   StkId o;
   lua_lock(L);
@@ -1123,12 +1156,15 @@ LUA_API void lua_rawseti (lua_State *L, int idx, lua_Integer n) {
   o = index2addr(L, idx);
   api_check(L, ttistable(o), "table expected");
   luaH_setint(L, hvalue(o), n, L->top - 1);
+  // The invalidateTMcache() step is skipped here, since tag methods are only
+  // set/unset with string keys.
   luaC_barrierback(L, hvalue(o), L->top-1);
   L->top--;
   lua_unlock(L);
 }
 
 
+// Like lua_rawseti() above, but using a C pointer (light userdata) as the key.
 LUA_API void lua_rawsetp (lua_State *L, int idx, const void *p) {
   StkId o;
   TValue k, *slot;
@@ -1145,6 +1181,10 @@ LUA_API void lua_rawsetp (lua_State *L, int idx, const void *p) {
 }
 
 
+// Set the metatable of the object at the given index to the table at the top of
+// the stack. Unset the metatable of the object if nil is the top value of the
+// stack. If the object has a type other than table or userdata, this sets the
+// global metatable for that type.
 LUA_API int lua_setmetatable (lua_State *L, int objindex) {
   TValue *obj;
   Table *mt;
@@ -1162,6 +1202,9 @@ LUA_API int lua_setmetatable (lua_State *L, int objindex) {
       hvalue(obj)->metatable = mt;
       if (mt) {
         luaC_objbarrier(L, gcvalue(obj), mt);
+        // Finalizers for objects in Lua are set by attaching a __gc() tag
+        // method to the object. So this checks for that tag method and
+        // registers the object for finalization if needed.
         luaC_checkfinalizer(L, gcvalue(obj), mt);
       }
       break;
@@ -1185,6 +1228,8 @@ LUA_API int lua_setmetatable (lua_State *L, int objindex) {
 }
 
 
+// Set the uservalue of the Udata at the given index to the value at the top of
+// the stack (popping the value off the stack afterwards).
 LUA_API void lua_setuservalue (lua_State *L, int idx) {
   StkId o;
   lua_lock(L);
