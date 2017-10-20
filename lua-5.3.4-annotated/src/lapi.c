@@ -813,51 +813,88 @@ LUA_API int lua_pushthread (lua_State *L) {
 */
 
 
+// Looks up a string key in a Lua table. Creates a Lua string out of the C
+// string `k` and uses that as the lookup key.
 static int auxgetstr (lua_State *L, const TValue *t, const char *k) {
   const TValue *slot;
+  // Convert C string to Lua string (possibly using the string cache).
   TString *str = luaS_new(L, k);
+  // Looks up the key in the table using luaH_getstr() and sets `slot` to the
+  // resulting value in the table. luaV_fastget() returns true iff the looked-up
+  // value is not nil.
   if (luaV_fastget(L, t, str, slot, luaH_getstr)) {
+    // Push the resulting value to the stack.
     setobj2s(L, L->top, slot);
     api_incr_top(L);
   }
+  // If the looked-up value was nil, we have to try the __index() metamethod.
   else {
+    // Push the key string to the stack, since luaV_finishget() writes its
+    // result value to a StkId.
     setsvalue2s(L, L->top, str);
     api_incr_top(L);
+    // Finish the table access by trying the __index() metamethod. The first
+    // `L->top - 1` argument specifies the key to look up, and the second one
+    // specifies where to write the result value of the lookup.
     luaV_finishget(L, t, L->top - 1, L->top - 1, slot);
   }
+  // The corresponding lua_lock() as at the top of the functions that call this
+  // auxiliary function.
   lua_unlock(L);
+  // Returns the basic type tag of the looked-up value.
   return ttnov(L->top - 1);
 }
 
 
+// Push the value of the named global variable to the stack, or nil if the
+// variable doesn't exist. Returns the type tag of the value (LUA_TNIL if the
+// variable doesn't exist).
 LUA_API int lua_getglobal (lua_State *L, const char *name) {
+  // Global variables are stored in a ordinary Lua table which is itself stored
+  // in another Lua table called the registry, which is kept in the
+  // global_State struct.
   Table *reg = hvalue(&G(L)->l_registry);
+  // Corresponding lua_unlock() call is in auxgetstr().
   lua_lock(L);
+  // The luaH_getint() call looks up the globals table in the registry table,
+  // then auxgetstr() looks up the variable name in the globals table.
   return auxgetstr(L, luaH_getint(reg, LUA_RIDX_GLOBALS), name);
 }
 
 
+// Look up a value in the table at the given index, using the value at the top
+// of the stack as the key.
 LUA_API int lua_gettable (lua_State *L, int idx) {
   StkId t;
   lua_lock(L);
   t = index2addr(L, idx);
+  // The first `L->top - 1` specifies the key, the second one specifies where
+  // the resulting value will be written to. So the key will be "popped" and the
+  // resulting value will be "pushed" to the stack.
   luaV_gettable(L, t, L->top - 1, L->top - 1);
   lua_unlock(L);
+  // Return the basic type tag of the resulting value.
   return ttnov(L->top - 1);
 }
 
 
+// Look up a string key (given as a C string) in the table at the given index.
+// Returns the basic type tag of the result (nil if the key doesn't exist).
 LUA_API int lua_getfield (lua_State *L, int idx, const char *k) {
+  // Corresponding lua_unlock() call is in auxgetstr().
   lua_lock(L);
   return auxgetstr(L, index2addr(L, idx), k);
 }
 
 
+// Look up a value in the Lua table at the given index using an int `n` as the
+// key. Returns the type tag of the resulting value.
 LUA_API int lua_geti (lua_State *L, int idx, lua_Integer n) {
   StkId t;
   const TValue *slot;
   lua_lock(L);
   t = index2addr(L, idx);
+  // Same as auxgetstr() above, but with luaH_getint().
   if (luaV_fastget(L, t, n, slot, luaH_getint)) {
     setobj2s(L, L->top, slot);
     api_incr_top(L);
@@ -872,22 +909,35 @@ LUA_API int lua_geti (lua_State *L, int idx, lua_Integer n) {
 }
 
 
+// Use the value at the top of the stack as a key to look up in the table at the
+// given index, and replace the key at the top of the stack with the looked-up
+// value. This is a raw lookup, so the __index() metamethod won't be tried. If
+// the key doesn't exist in the table, the result is nil. Returns the basic type
+// tag of the result.
 LUA_API int lua_rawget (lua_State *L, int idx) {
   StkId t;
   lua_lock(L);
   t = index2addr(L, idx);
+  // Most table lookup functions can take any type of Lua value that might have
+  // an __index() metamethod. But for a raw lookup, it only makes sense to pass
+  // an actual Lua table.
   api_check(L, ttistable(t), "table expected");
+  // "Pops" the key off the stack and "pushes" the looked-up value (or nil) to
+  // the stack.
   setobj2s(L, L->top - 1, luaH_get(hvalue(t), L->top - 1));
   lua_unlock(L);
   return ttnov(L->top - 1);
 }
 
 
+// Raw lookup using an int key, in the table at the given index. Returns the
+// basic type tag of the result.
 LUA_API int lua_rawgeti (lua_State *L, int idx, lua_Integer n) {
   StkId t;
   lua_lock(L);
   t = index2addr(L, idx);
   api_check(L, ttistable(t), "table expected");
+  // Push the looked-up value to the stack.
   setobj2s(L, L->top, luaH_getint(hvalue(t), n));
   api_incr_top(L);
   lua_unlock(L);
@@ -895,13 +945,18 @@ LUA_API int lua_rawgeti (lua_State *L, int idx, lua_Integer n) {
 }
 
 
+// Raw lookup using a C pointer (a light userdata value in Lua) as the key, in
+// the table at the given index. Returns the basic type tag of the result.
 LUA_API int lua_rawgetp (lua_State *L, int idx, const void *p) {
   StkId t;
   TValue k;
   lua_lock(L);
   t = index2addr(L, idx);
   api_check(L, ttistable(t), "table expected");
+  // Convert `p` to a light userdata (just a void pointer wrapped in a TValue),
+  // to use as the key.
   setpvalue(&k, cast(void *, p));
+  // Push the looked-up value to the stack.
   setobj2s(L, L->top, luaH_get(hvalue(t), &k));
   api_incr_top(L);
   lua_unlock(L);
@@ -909,25 +964,38 @@ LUA_API int lua_rawgetp (lua_State *L, int idx, const void *p) {
 }
 
 
+// Pushes a new, empty Lua table to the stack. If `narray` or `nrec` aren't 0,
+// preallocates the array part and/or the hash part, respectively, to be able to
+// hold that many elements.
 LUA_API void lua_createtable (lua_State *L, int narray, int nrec) {
   Table *t;
   lua_lock(L);
+  // Create new Lua table.
   t = luaH_new(L);
+  // Push it to the stack.
   sethvalue(L, L->top, t);
   api_incr_top(L);
+  // Resize it if requested.
   if (narray > 0 || nrec > 0)
     luaH_resize(L, t, narray, nrec);
+  // Do one step of garbage collection at this point.
   luaC_checkGC(L);
   lua_unlock(L);
 }
 
 
+// Pushes the metatable of the object at the given index to the stack. If the
+// object doesn't have a metatable, it returns 0 and nothing is pushed to the
+// stack. Otherwise it returns 1.
 LUA_API int lua_getmetatable (lua_State *L, int objindex) {
   const TValue *obj;
   Table *mt;
   int res = 0;
   lua_lock(L);
   obj = index2addr(L, objindex);
+  // Table and Udata objects contain their own individual metatables. All other
+  // types have the same global metatable for that type, contained in the `mt`
+  // field of the global_State struct.
   switch (ttnov(obj)) {
     case LUA_TTABLE:
       mt = hvalue(obj)->metatable;
@@ -936,9 +1004,12 @@ LUA_API int lua_getmetatable (lua_State *L, int objindex) {
       mt = uvalue(obj)->metatable;
       break;
     default:
+      // Look up this type's global metatable using the type tag as an index
+      // into the `mt` array.
       mt = G(L)->mt[ttnov(obj)];
       break;
   }
+  // If the object has a metatable, push it to the stack and return 1.
   if (mt != NULL) {
     sethvalue(L, L->top, mt);
     api_incr_top(L);
@@ -949,11 +1020,14 @@ LUA_API int lua_getmetatable (lua_State *L, int objindex) {
 }
 
 
+// Get the uservalue of the full userdata object at the given index. Pushes the
+// uservalue to the stack.
 LUA_API int lua_getuservalue (lua_State *L, int idx) {
   StkId o;
   lua_lock(L);
   o = index2addr(L, idx);
   api_check(L, ttisfulluserdata(o), "full userdata expected");
+  // Get the uservalue and put it on top of the stack.
   getuservalue(L, uvalue(o), L->top);
   api_incr_top(L);
   lua_unlock(L);
