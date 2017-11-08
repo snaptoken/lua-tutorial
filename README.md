@@ -61,6 +61,9 @@ Here are the main steps I plan to take in developing this tutorial:
 
 I'm well into step 2, and am starting work on step 3.
 
+Update: I'm skipping step 3, it's not worth it. I'm diving right in to step 4.
+See `MACROSTEPS.md`.
+
 ### Possible orders
 
 * Classic: repl -> lexing -> parsing -> evaluating expressions -> ...
@@ -90,6 +93,14 @@ I'm well into step 2, and am starting work on step 3.
     JSON), so for the parser we could start by parsing literal values/tables
     before going on to parse executable code.
 
+I think the "Augmenting C" order will be used for the beginning, and then
+we'll try to keep it interesting by doing the "topic after topic" thing. Some
+features might use the "Stages" idea, where a basic version will be
+implemented in say the first half of the book, then the more advanced version
+will come much later. So there, it'll be a combination of the above ordering
+ideas. (Even the "Classic" order will probably make an appearance... it just
+won't be anywhere near the beginning of the book.)
+
 ### Ideas
 
 * Self-contained chapters: Might be nice to make at least certain chapters more
@@ -97,4 +108,6 @@ I'm well into step 2, and am starting work on step 3.
   they've worked through the entire book up to that point, or that they even
   know anything about Lua. They might just be someone interested in learning
   about GC. Keep those people in mind.
-
+* "Final" lines of code: mark lines of code that are in their "final" state.
+  That is, lines that exist in the final version of the code. Give them a
+  subtle grey background maybe, like the line is "set in stone".
